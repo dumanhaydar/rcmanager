@@ -56,6 +56,7 @@ func start(t *testing.T) (*Daemon, string) {
 	t.Helper()
 	home := t.TempDir()
 	t.Setenv("RCMANAGER_HOME", home)
+	t.Setenv("RCMANAGER_CLAIM_DIR", t.TempDir())
 	// A unix socket path is limited to about a hundred characters, and a test
 	// temporary directory is nowhere near that short — which is exactly what
 	// RCMANAGER_SOCK exists for.

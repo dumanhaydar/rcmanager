@@ -3,6 +3,7 @@ package session
 import (
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -29,15 +30,22 @@ type fake struct {
 	// nameInSignature mimics a provider that puts the session name on the
 	// command line, the way a Claude environment or Codex session does.
 	nameInSignature bool
+	// preflight, when set, is what the provider reports instead of "ok".
+	preflight *provider.Result
 }
 
-func (fake) ID() string                                { return "fake" }
-func (fake) DisplayName() string                       { return "Fake Agent" }
-func (fake) Limitations() []string                     { return nil }
-func (fake) EnvDeny() []*regexp.Regexp                 { return nil }
-func (fake) Detect() provider.Detection                { return provider.Detection{Available: true} }
-func (fake) Discover(string) []provider.Discovered     { return nil }
-func (fake) Preflight(*registry.Entry) provider.Result { return provider.Result{OK: true} }
+func (fake) ID() string                            { return "fake" }
+func (fake) DisplayName() string                   { return "Fake Agent" }
+func (fake) Limitations() []string                 { return nil }
+func (fake) EnvDeny() []*regexp.Regexp             { return nil }
+func (fake) Detect() provider.Detection            { return provider.Detection{Available: true} }
+func (fake) Discover(string) []provider.Discovered { return nil }
+func (f fake) Preflight(*registry.Entry) provider.Result {
+	if f.preflight != nil {
+		return *f.preflight
+	}
+	return provider.Result{OK: true}
+}
 
 func (f fake) Capabilities() provider.Capabilities {
 	return provider.Capabilities{PublishesRemoteURL: f.url != nil, Headless: true}
@@ -85,6 +93,7 @@ func withHome(t *testing.T) {
 	t.Helper()
 	t.Setenv("RCMANAGER_HOME", t.TempDir())
 	paths.Reload()
+	t.Setenv("RCMANAGER_CLAIM_DIR", t.TempDir())
 	t.Cleanup(func() {
 		os.Unsetenv("RCMANAGER_HOME")
 		paths.Reload()
@@ -484,5 +493,147 @@ func TestRenameAStoppedSession(t *testing.T) {
 	}
 	if s.View().Status != Stopped {
 		t.Errorf("status = %q, want it left alone", s.View().Status)
+	}
+}
+
+// The collision this exists for: two daemons, each with the session in its own
+// registry, both entitled to supervise it as far as either can tell. The
+// second one is refused, and told who holds it.
+func TestASecondSupervisorIsRefused(t *testing.T) {
+	withHome(t)
+	script := `while true; do sleep 1; done`
+
+	entry, err := registry.Normalize(&registry.Entry{
+		Name: "demo", Provider: "fake", SessionID: "shared-conversation",
+		Cwd: t.TempDir(), Enabled: true,
+	}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	first := New(entry, fake{script: script}, Options{Config: testConfig()})
+	defer first.Dispose()
+	if r := first.Start(false); !r.OK {
+		t.Fatalf("the first supervisor could not start it: %+v", r)
+	}
+	waitFor(t, "the session to come online", func() bool { return first.Status() == Online })
+
+	// A second daemon's view of the same conversation, registered under
+	// another name entirely — which is exactly how the collision happens.
+	otherEntry := entry.Clone()
+	otherEntry.Name = "same-conversation-other-name"
+	second := New(otherEntry, fake{script: script}, Options{Config: testConfig()})
+	defer second.Dispose()
+
+	r := second.Start(false)
+	if r.OK {
+		t.Fatal("two supervisors were allowed on one conversation")
+	}
+	if !strings.Contains(r.Error, "already supervised by") {
+		t.Errorf("error = %q, want it to name the other supervisor", r.Error)
+	}
+	if !strings.Contains(r.Error, strconv.Itoa(os.Getpid())) {
+		t.Errorf("error = %q, want the holder's pid", r.Error)
+	}
+	if second.Pid() != 0 {
+		t.Error("the refused session spawned a process anyway")
+	}
+	if first.Status() != Online || !procs.IsAlive(first.Pid()) {
+		t.Error("the refusal disturbed the session that rightfully held it")
+	}
+
+	// Once the holder lets go, the conversation is available again.
+	first.Stop("test")
+	if r := second.Start(false); !r.OK {
+		t.Fatalf("the conversation was not released: %+v", r)
+	}
+	second.Stop("test")
+}
+
+// Handing over is not giving up: a daemon that detaches must release the
+// conversation so its successor can adopt it.
+func TestDetachReleasesTheConversation(t *testing.T) {
+	withHome(t)
+	script := `while true; do sleep 1; done`
+	entry, _ := registry.Normalize(&registry.Entry{
+		Name: "demo", Provider: "fake", SessionID: "handover", Cwd: t.TempDir(), Enabled: true,
+	}, "")
+
+	first := New(entry, fake{script: script}, Options{Config: testConfig()})
+	defer first.Dispose()
+	first.Start(false)
+	waitFor(t, "the session to come online", func() bool { return first.Status() == Online })
+
+	pid := first.Pid()
+	saved := first.Persisted()
+	first.Detach()
+
+	successor := New(entry, fake{script: script}, Options{Config: testConfig()})
+	defer func() {
+		successor.Stop("test")
+		successor.Dispose()
+	}()
+	successor.SetSavedState(&saved)
+
+	r := successor.Start(false)
+	if !r.OK || !r.Adopted {
+		t.Fatalf("the successor could not adopt what was handed to it: %+v", r)
+	}
+	if successor.Pid() != pid {
+		t.Errorf("adopted pid = %d, want %d", successor.Pid(), pid)
+	}
+}
+
+// A session in its restart backoff is still this daemon's to supervise;
+// nothing else may step in while it waits.
+func TestTheClaimIsHeldAcrossARestartBackoff(t *testing.T) {
+	withHome(t)
+	cfg := testConfig()
+	cfg.RestartDelayMs = 3000
+	entry, _ := registry.Normalize(&registry.Entry{
+		Name: "demo", Provider: "fake", SessionID: "backoff", Cwd: t.TempDir(), Enabled: true,
+	}, "")
+
+	first := New(entry, fake{script: `exit 1`}, Options{Config: cfg})
+	defer func() {
+		first.Stop("test")
+		first.Dispose()
+	}()
+	first.Start(false)
+	waitFor(t, "the session to be waiting out its backoff", func() bool { return first.Status() == Restarting })
+
+	other := New(entry.Clone(), fake{script: `exit 1`}, Options{Config: cfg})
+	defer other.Dispose()
+	if r := other.Start(false); r.OK {
+		t.Error("another supervisor slipped in while the session was restarting")
+	}
+}
+
+// A daemon that tried to start a session and could not is not supervising
+// anything, so it must not keep the conversation locked away from the daemon
+// that could.
+func TestAFailedStartReleasesTheConversation(t *testing.T) {
+	withHome(t)
+	entry, _ := registry.Normalize(&registry.Entry{
+		Name: "demo", Provider: "fake", SessionID: "contested", Cwd: t.TempDir(), Enabled: true,
+	}, "")
+
+	refused := New(entry, fake{script: `exit 0`, preflight: &provider.Result{
+		Error: "the provider says no", Hint: "fix it",
+	}}, Options{Config: testConfig()})
+	defer refused.Dispose()
+
+	if r := refused.Start(false); r.OK {
+		t.Fatal("a failed preflight still started the session")
+	}
+
+	// The conversation is free for a daemon that can actually run it.
+	willing := New(entry.Clone(), fake{script: `while true; do sleep 1; done`}, Options{Config: testConfig()})
+	defer func() {
+		willing.Stop("test")
+		willing.Dispose()
+	}()
+	if r := willing.Start(false); !r.OK {
+		t.Fatalf("the conversation was still locked by the failed start: %+v", r)
 	}
 }

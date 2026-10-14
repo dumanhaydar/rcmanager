@@ -208,6 +208,13 @@ started yourself, is never touched. Under systemd each session additionally runs
 in its own transient scope, so `systemctl stop rcmanager` cannot sweep up the
 work.
 
+**One supervisor per conversation.** Two daemons with different homes, each with
+the session in its own registry, would both restart it and leave two agents
+appending to one transcript. Each session is claimed with an `flock(2)` keyed on
+the conversation, held only while it is actually supervised, so a second daemon
+is refused and told which one holds it — while a daemon that dies, hands over or
+fails to start lets go of it immediately.
+
 And one thing rcmanager deliberately will not do: answer a security prompt for
 you. It clicks through the resume-summary and "Enable Remote Control?" modals,
 which are the things you already asked for by starting the session. A

@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/dumanhaydar/rcmanager/internal/claim"
 	"github.com/dumanhaydar/rcmanager/internal/config"
 	"github.com/dumanhaydar/rcmanager/internal/logstream"
 	"github.com/dumanhaydar/rcmanager/internal/paths"
@@ -158,6 +159,7 @@ type Managed struct {
 	minUpTimer   *time.Timer
 	adoptStop    chan struct{}
 
+	claim     *claim.Claim
 	io        *sio.IO
 	tailers   []*sio.Tailer
 	captureAt sio.Offsets

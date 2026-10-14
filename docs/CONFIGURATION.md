@@ -98,6 +98,50 @@ Saving a file is not permission to restart an agent mid-thought.
 - Sessions added, removed, enabled or disabled do move: that is an explicit
   instruction either way.
 
+## One supervisor per conversation
+
+Two rcmanager daemons started with different `RCMANAGER_HOME` values each have
+their own registry, and each is entitled to supervise a session as far as it
+can tell. Both then restart it, and two agents end up appending to one
+transcript. rcmanager refuses that:
+
+```console
+$ rcmanager start api-refactor
+✖ refusing to start: session 3f5a37e1-… is already supervised by another
+  rcmanager daemon (pid 2628 · state ~/.rcmanager-old · as "api")
+  Two supervisors on one conversation fork its history. Stop that daemon
+  (`rcmanager daemon --stop`), or manage this session from it.
+```
+
+The lock is keyed on the *conversation* — the session id — so the same
+transcript registered under two different names is still caught. A provider
+that allows only one managed session per machine (Codex) is keyed on the
+provider instead, which makes that rule hold across daemons too.
+
+It is `flock(2)`, held by the daemon for exactly as long as it supervises the
+session, which has three consequences worth knowing:
+
+- A daemon that is `kill -9`'d, or whose machine loses power, leaves nothing
+  stale behind: the kernel drops the lock with the process.
+- Handing over releases it. `rcmanager upgrade`, a service restart and a crash
+  all let the successor claim what it is about to adopt.
+- A start that fails releases it too. A daemon that could not run the session
+  does not get to keep other daemons away from it.
+
+This is the only thing rcmanager writes outside `$RCMANAGER_HOME`, because a
+guard kept inside the home it is guarding against would not be one. The locks
+are empty files under `~/.cache/rcmanager/claims` (or `$XDG_CACHE_HOME`, or
+`$RCMANAGER_CLAIM_DIR` when you want to point them somewhere else), each
+holding one line naming the daemon that holds it. If that directory cannot be
+used at all, rcmanager says so on the session and supervises anyway: refusing
+to work would be a worse failure than the one this prevents.
+
+Note that this is a different check from the provider's. rcmanager also
+refuses to start an agent on a conversation that an agent process outside
+rcmanager is already running — a terminal, an IDE, or an orphan left by a
+daemon that was killed. Both refusals name the process or daemon in the way,
+so the fix is always visible.
+
 ## Renaming a session
 
 ```sh

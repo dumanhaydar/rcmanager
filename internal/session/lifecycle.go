@@ -10,6 +10,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/dumanhaydar/rcmanager/internal/claim"
 	"github.com/dumanhaydar/rcmanager/internal/isolate"
 	"github.com/dumanhaydar/rcmanager/internal/paths"
 	"github.com/dumanhaydar/rcmanager/internal/procs"
@@ -45,6 +46,13 @@ func (m *Managed) Start(force bool) Result {
 	m.savedState = nil
 	m.mu.Unlock()
 
+	// Before anything is supervised — adopting is supervising — make sure no
+	// other daemon is already doing it. Two supervisors on one conversation
+	// end with two agents appending to one transcript.
+	if res, ok := m.claimConversation(); !ok {
+		return res
+	}
+
 	if m.tryAdopt(saved) {
 		m.mu.Lock()
 		res := Result{OK: true, Adopted: true, Status: m.viewLocked()}
@@ -57,6 +65,7 @@ func (m *Managed) Start(force bool) Result {
 	if m.canStart != nil {
 		if veto := m.canStart(m); veto != nil {
 			m.mu.Lock()
+			m.releaseClaimLocked()
 			m.updateLocked(func() {
 				m.status = Stopped
 				m.message = veto.Error
@@ -76,6 +85,7 @@ func (m *Managed) Start(force bool) Result {
 	pre := prov.Preflight(entry)
 	if !pre.OK {
 		m.mu.Lock()
+		m.releaseClaimLocked()
 		m.updateLocked(func() {
 			m.status = Errored
 			m.message = pre.Error
@@ -94,6 +104,10 @@ func (m *Managed) Start(force bool) Result {
 		if owner := finder.FindExternalOwner(entry, exclude); owner != nil {
 			msg := "refusing to start: " + owner.Reason
 			m.mu.Lock()
+			// Someone else's agent process owns this conversation, so this
+			// daemon is not supervising it and must not keep the claim: that
+			// would lock out the daemon whose child it actually is.
+			m.releaseClaimLocked()
 			m.updateLocked(func() {
 				m.status = Stopped
 				m.message = msg
@@ -117,6 +131,7 @@ func (m *Managed) spawnChild() Result {
 	entry, prov := m.entry, m.prov
 	cmdSpec, err := prov.BuildCommand(entry)
 	if err != nil {
+		m.releaseClaimLocked()
 		m.updateLocked(func() {
 			m.status = Errored
 			m.message = err.Error()
@@ -163,6 +178,7 @@ func (m *Managed) spawnChild() Result {
 
 	if err := m.io.Open(true); err != nil {
 		msg := "could not open session stdio: " + err.Error()
+		m.releaseClaimLocked()
 		m.updateLocked(func() {
 			m.status = Errored
 			m.message = msg
@@ -186,6 +202,7 @@ func (m *Managed) spawnChild() Result {
 
 	if err := child.Start(); err != nil {
 		msg := "spawn failed: " + err.Error()
+		m.releaseClaimLocked()
 		m.updateLocked(func() {
 			m.status = Errored
 			m.message = msg
@@ -312,14 +329,17 @@ func (m *Managed) handleExit(code int, signal string) {
 
 	if stopping {
 		m.stopping = false
+		m.releaseClaimLocked()
 		m.updateLocked(func() { m.status = stoppedStatus(enabled) })
 		return
 	}
 	if !enabled {
+		m.releaseClaimLocked()
 		m.updateLocked(func() { m.status = Disabled })
 		return
 	}
 	if !autorestart {
+		m.releaseClaimLocked()
 		m.updateLocked(func() {
 			m.status = Stopped
 			m.message = "exited (autorestart disabled)"
@@ -358,6 +378,7 @@ func (m *Managed) handleExit(code int, signal string) {
 			m.message = msg
 		})
 		m.logLocked(msg + " — giving up. Fix the cause and run: rcmanager restart " + m.entry.Name)
+		m.releaseClaimLocked()
 		return
 	}
 
@@ -399,6 +420,7 @@ func (m *Managed) Stop(reason string) Result {
 		m.cmd = nil
 		m.pid = 0
 		enabled := m.entry.Enabled
+		m.releaseClaimLocked()
 		m.mu.Unlock()
 
 		m.stopCapture()
@@ -441,6 +463,8 @@ func (m *Managed) Stop(reason string) Result {
 		m.cmd = nil
 		m.pid = 0
 		m.stopping = false
+		// The pid is not ours to signal, so it is not ours to claim either.
+		m.releaseClaimLocked()
 		m.updateLocked(func() {
 			m.status = Stopped
 			m.message = msg
@@ -453,6 +477,7 @@ func (m *Managed) Stop(reason string) Result {
 	m.stopping = false
 	m.adopted = false
 	m.restartTimes = nil
+	m.releaseClaimLocked()
 	m.updateLocked(func() {
 		m.status = stoppedStatus(enabled)
 		m.message = ""
@@ -487,6 +512,9 @@ func (m *Managed) Detach() {
 	// Drop our own exit bookkeeping first: closing the fifo must not look like
 	// the session died.
 	m.cmd = nil
+	// Hand the conversation over: the successor daemon has to be able to claim
+	// what it is about to adopt.
+	m.releaseClaimLocked()
 	m.mu.Unlock()
 
 	for _, t := range tailers {
@@ -512,6 +540,7 @@ func (m *Managed) Dispose() {
 	m.mu.Lock()
 	m.stopTimersLocked()
 	m.stopAdoptPollLocked()
+	m.releaseClaimLocked()
 	m.mu.Unlock()
 
 	m.stopCapture()
@@ -892,4 +921,67 @@ func renameLogs(from, to paths.LogFiles, retain int) error {
 		}
 	}
 	return nil
+}
+
+// claimConversation takes the machine-wide lock on this session's
+// conversation, so no second daemon can supervise it at the same time.
+//
+// A lock that cannot be used at all — an unwritable cache directory, an
+// exotic filesystem — is reported on the session and then ignored: refusing
+// to supervise anything would be a worse failure than the one this guards
+// against, and saying so beats being silent about it.
+func (m *Managed) claimConversation() (Result, bool) {
+	m.mu.Lock()
+	if m.claim != nil {
+		m.mu.Unlock()
+		return Result{}, true
+	}
+	entry, prov := m.entry, m.prov
+	m.mu.Unlock()
+
+	key := claim.Key(prov.ID(), entry.SessionID, entry.Name, prov.Capabilities().Singleton)
+	held, holder, err := claim.Acquire(key, claim.Holder{
+		Pid:  os.Getpid(),
+		Home: paths.Get().Home,
+		Name: entry.Name,
+	})
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if err != nil {
+		msg := "could not take the single-supervisor lock (" + err.Error() + ") — supervising anyway"
+		m.updateLocked(func() { m.message = msg })
+		m.logLocked(msg)
+		return Result{}, true
+	}
+	if held == nil {
+		what := "this session"
+		if entry.SessionID != "" {
+			what = "session " + entry.SessionID
+		}
+		msg := "refusing to start: " + what + " is already supervised by " + holder.Describe()
+		m.updateLocked(func() {
+			m.status = Stopped
+			m.message = msg
+		})
+		m.logLocked(msg)
+		return Result{
+			Error: msg,
+			Hint: "Two supervisors on one conversation fork its history. Stop that daemon " +
+				"(`rcmanager daemon --stop`), or manage this session from it.",
+			Status: m.viewLocked(),
+		}, false
+	}
+
+	m.claim = held
+	return Result{}, true
+}
+
+func (m *Managed) releaseClaimLocked() {
+	if m.claim == nil {
+		return
+	}
+	m.claim.Release()
+	m.claim = nil
 }
