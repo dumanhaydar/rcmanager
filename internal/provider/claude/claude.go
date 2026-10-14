@@ -505,72 +505,76 @@ func appendOption(args []string, e *registry.Entry, option, flag string) []strin
 // Patterns are written WITHOUT whitespace: the TUI paints with absolute cursor
 // positioning, so the words arrive glued together (see the match
 // normalisation in package session).
-func (Provider) Interactions() []provider.Interaction {
-	return []provider.Interaction{
-		{
-			ID:    "resume-prompt",
-			Once:  true,
-			Match: regexp.MustCompile(`(?i)resumefromsummary|resumefullsessionas-is`),
-			// resumeMode picks the answer: "summary" (default, far cheaper on
-			// usage limits) or "full".
-			Respond: func(e *registry.Entry) string {
-				if v, _ := e.Option("resumeMode"); v == "full" {
-					return "2"
-				}
-				return "1"
-			},
-			Answered: "answered the resume summary/full prompt",
-			Describe: "the resume summary/full prompt is unanswered",
-			Delay:    1200 * time.Millisecond,
+//
+// The list is built once. It is consulted on every chunk of a session's
+// output, and compiling four patterns per chunk showed up in the supervisor's
+// profile for no reason at all.
+var interactions = []provider.Interaction{
+	{
+		ID:    "resume-prompt",
+		Once:  true,
+		Match: regexp.MustCompile(`(?i)resumefromsummary|resumefullsessionas-is`),
+		// resumeMode picks the answer: "summary" (default, far cheaper on
+		// usage limits) or "full".
+		Respond: func(e *registry.Entry) string {
+			if v, _ := e.Option("resumeMode"); v == "full" {
+				return "2"
+			}
+			return "1"
 		},
-		{
-			// A brand-new remote-control session asks this before it publishes
-			// anything. Unanswered, the process sits at the prompt: alive, so
-			// rcmanager called it online, but with remote control never switched on
-			// and no URL ever printed — invisible in the app, for exactly as
-			// long as you care to wait.
-			//
-			// Answering is not a judgement call the way workspace trust is. The
-			// session was started by `rcmanager start` on a remote-control
-			// provider; enabling remote control is the thing that was asked for.
-			ID:    "enable-remote-control",
-			Once:  true,
-			Match: regexp.MustCompile(`(?i)enableremotecontrol`),
-			// Written on a fifo rather than a tty, so the line terminator has to
-			// be \n; a bare \r would never end the line.
-			Respond:  func(*registry.Entry) string { return "y\n" },
-			Answered: `answered the "Enable Remote Control?" prompt`,
-			Describe: `waiting at the "Enable Remote Control?" prompt`,
-			Delay:    500 * time.Millisecond,
+		Answered: "answered the resume summary/full prompt",
+		Describe: "the resume summary/full prompt is unanswered",
+		Delay:    1200 * time.Millisecond,
+	},
+	{
+		// A brand-new remote-control session asks this before it publishes
+		// anything. Unanswered, the process sits at the prompt: alive, so
+		// rcmanager called it online, but with remote control never switched on
+		// and no URL ever printed — invisible in the app, for exactly as
+		// long as you care to wait.
+		//
+		// Answering is not a judgement call the way workspace trust is. The
+		// session was started by `rcmanager start` on a remote-control
+		// provider; enabling remote control is the thing that was asked for.
+		ID:    "enable-remote-control",
+		Once:  true,
+		Match: regexp.MustCompile(`(?i)enableremotecontrol`),
+		// Written on a fifo rather than a tty, so the line terminator has to
+		// be \n; a bare \r would never end the line.
+		Respond:  func(*registry.Entry) string { return "y\n" },
+		Answered: `answered the "Enable Remote Control?" prompt`,
+		Describe: `waiting at the "Enable Remote Control?" prompt`,
+		Delay:    500 * time.Millisecond,
+	},
+	{
+		ID:    "trust-dialog",
+		Once:  true,
+		Match: regexp.MustCompile(`(?i)isthisaprojectyoucreatedoroneyoutrust|yes,itrustthisfolder|doyoutrustthefiles|workspacenottrusted`),
+		// Accepting a workspace-trust prompt is a security decision, so
+		// rcmanager only does it when a human has opted in per session with
+		// providerOptions.trustWorkspace. Otherwise it reports the block.
+		// The menu preselects "No, exit"; down-then-enter picks "Yes".
+		Respond: func(e *registry.Entry) string {
+			if e.BoolOption("trustWorkspace") {
+				return "\x1b[B\r"
+			}
+			return ""
 		},
-		{
-			ID:    "trust-dialog",
-			Once:  true,
-			Match: regexp.MustCompile(`(?i)isthisaprojectyoucreatedoroneyoutrust|yes,itrustthisfolder|doyoutrustthefiles|workspacenottrusted`),
-			// Accepting a workspace-trust prompt is a security decision, so
-			// rcmanager only does it when a human has opted in per session with
-			// providerOptions.trustWorkspace. Otherwise it reports the block.
-			// The menu preselects "No, exit"; down-then-enter picks "Yes".
-			Respond: func(e *registry.Entry) string {
-				if e.BoolOption("trustWorkspace") {
-					return "\x1b[B\r"
-				}
-				return ""
-			},
-			Fatal:    true,
-			Answered: "accepted the workspace trust dialog (providerOptions.trustWorkspace is set for this session)",
-			Describe: "blocked by the workspace trust dialog — run `claude` in this directory once and accept it (for a resumed session, providerOptions.trustWorkspace = true also works; a brand-new session has no dialog to answer and must be trusted interactively)",
-			Delay:    1200 * time.Millisecond,
-		},
-		{
-			ID:       "browser-prompt",
-			Once:     true,
-			Match:    regexp.MustCompile(`(?i)claudewantstouseyourbrowser`),
-			Fatal:    true,
-			Describe: "blocked by the Claude-in-Chrome permission prompt — answer it once interactively, or add \"--no-chrome\" to the session args",
-		},
-	}
+		Fatal:    true,
+		Answered: "accepted the workspace trust dialog (providerOptions.trustWorkspace is set for this session)",
+		Describe: "blocked by the workspace trust dialog — run `claude` in this directory once and accept it (for a resumed session, providerOptions.trustWorkspace = true also works; a brand-new session has no dialog to answer and must be trusted interactively)",
+		Delay:    1200 * time.Millisecond,
+	},
+	{
+		ID:       "browser-prompt",
+		Once:     true,
+		Match:    regexp.MustCompile(`(?i)claudewantstouseyourbrowser`),
+		Fatal:    true,
+		Describe: "blocked by the Claude-in-Chrome permission prompt — answer it once interactively, or add \"--no-chrome\" to the session args",
+	},
 }
+
+func (Provider) Interactions() []provider.Interaction { return interactions }
 
 // TrustState reads workspace trust from Claude's own record rather than
 // discovering it by running into the modal.

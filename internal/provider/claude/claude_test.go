@@ -295,3 +295,23 @@ func TestExtractRemoteURLStillRejectsUnrelatedTokens(t *testing.T) {
 		}
 	}
 }
+
+// The interaction list is consulted on every chunk of a session's output, so
+// it must not be rebuilt — and in particular its patterns must not be
+// recompiled — per call.
+func TestInteractionsAreBuiltOnce(t *testing.T) {
+	first := (Provider{}).Interactions()
+	second := (Provider{}).Interactions()
+
+	if len(first) == 0 {
+		t.Fatal("no interactions declared")
+	}
+	if &first[0] != &second[0] {
+		t.Error("Interactions() rebuilds its list on every call")
+	}
+	for _, action := range first {
+		if action.Match == nil {
+			t.Errorf("interaction %q has no pattern", action.ID)
+		}
+	}
+}
