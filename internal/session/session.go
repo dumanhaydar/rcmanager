@@ -134,12 +134,18 @@ type Managed struct {
 	pid       int
 	signature []string
 	startedAt time.Time
-	status    Status
-	message   string
-	remoteURL string
-	urlLocked bool
-	lastExit  *Exit
-	restarts  int
+	// urlWatchFrom is when *this* daemon started reading this session's
+	// output. The announcement window is measured from here, not from the
+	// session's start: an adopted session announced its URL long before this
+	// daemon existed, and the TUI reprints the banner on every repaint, so
+	// measuring from the original start meant never looking at all.
+	urlWatchFrom time.Time
+	status       Status
+	message      string
+	remoteURL    string
+	urlLocked    bool
+	lastExit     *Exit
+	restarts     int
 	// restartTimes is the crash-loop budget: only short-lived exits are
 	// recorded, so a session that ran happily for hours always gets a fresh
 	// allowance.

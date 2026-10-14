@@ -203,7 +203,7 @@ func (m *Managed) captureRemoteURL(text string) {
 	if m.urlLocked {
 		return
 	}
-	if !m.startedAt.IsZero() && time.Since(m.startedAt) > urlWindow {
+	if !m.urlWatchFrom.IsZero() && time.Since(m.urlWatchFrom) > urlWindow {
 		m.urlLocked = true
 		m.urlBuf = ""
 		return

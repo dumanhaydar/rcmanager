@@ -771,23 +771,53 @@ func (Provider) FindExternalOwner(e *registry.Entry, excludePids []int) *provide
 	return nil
 }
 
-// Real ids are `session_` + 24 characters. A repaint can drop a character out
-// of the middle of the id itself, and a truncated id yields a link that
-// resolves to nothing while looking entirely plausible, so anything shorter is
-// treated as damage and skipped: the TUI repaints often enough that an intact
-// copy follows.
-const idPattern = `session_[A-Za-z0-9]{24}`
+// Real ids are `session_` + exactly 24 characters.
+//
+// The payload is matched strictly: a repaint can drop a character out of the
+// middle of the id, and a truncated id yields a link that resolves to nothing
+// while looking entirely plausible, so only 24 characters followed by a
+// boundary count. The TUI repaints often enough that an intact copy follows.
+//
+// The `session` prefix, on the other hand, is matched loosely, because the
+// repaint damages it too. Observed in the field, for a session that was live
+// and reachable the whole time:
+//
+//	https://claude.ai/code/ssion_01RDLippg3f1VTL2o8xpydE8
+//
+// — two characters gone from the word, nothing wrong with the id. Requiring
+// the literal prefix meant reporting no URL at all for that session, and the
+// watchdog complaining about it forever. So any prefix that is a subsequence
+// of "session" is accepted, which is loose enough for dropped characters and
+// far too tight to match an unrelated token.
+const idPattern = `([A-Za-z]{1,7})_([A-Za-z0-9]{24})(?:[^A-Za-z0-9]|$)`
 
 var (
 	// urlBuf arrives with whitespace collapsed, and the repaint sometimes drops
 	// the spaces between words altogether ("remote-controlisactive"), so
 	// whitespace is optional here rather than required.
-	announcedRe = regexp.MustCompile(`(?i)remote-?control\s*is\s*active[\s\S]{0,200}?(` + idPattern + `)([^A-Za-z0-9]|$)`)
+	announcedRe = regexp.MustCompile(`(?i)remote-?control\s*is\s*active[\s\S]{0,200}?` + idPattern)
 	// Accept an id that still carries a recognisable url around it, allowing
 	// for a mangled host and path (`claude.a/code/`, `claude.ai/coe/`).
-	nearRe = regexp.MustCompile(`(?i)claude\.[a-z]{0,3}/[a-z]{1,5}/(` + idPattern + `)([^A-Za-z0-9]|$)`)
+	nearRe = regexp.MustCompile(`(?i)claude\.[a-z]{0,3}/[a-z]{1,5}/` + idPattern)
 	envRe  = regexp.MustCompile(`(?i)claude\.a[a-z]{0,2}/code\?environment=(env_[A-Za-z0-9]{12,})`)
 )
+
+// isDamagedSessionPrefix reports whether prefix is what a repaint can leave of
+// the word "session": its characters, in order, with some of them missing.
+func isDamagedSessionPrefix(prefix string) bool {
+	const word = "session"
+	i := 0
+	for _, r := range strings.ToLower(prefix) {
+		for i < len(word) && word[i] != byte(r) {
+			i++
+		}
+		if i == len(word) {
+			return false
+		}
+		i++
+	}
+	return true
+}
 
 // ExtractRemoteURL pulls the remote-control URL out of the session's own
 // output.
@@ -809,16 +839,28 @@ var (
 // So only the id is read out of the output, and the URL is rebuilt around it.
 // The id is the payload; the host is a constant we already know.
 func (Provider) ExtractRemoteURL(text string) string {
-	if m := lastMatch(announcedRe, text); m != "" {
+	if m := lastSessionID(announcedRe, text); m != "" {
 		return sessionURL(m)
 	}
-	if m := lastMatch(nearRe, text); m != "" {
+	if m := lastSessionID(nearRe, text); m != "" {
 		return sessionURL(m)
 	}
 	// An environment publishes a different shape. rcmanager does not manage
 	// environments, but reporting nothing would look like a stall.
 	if m := lastMatch(envRe, text); m != "" {
 		return "https://claude.ai/code?environment=" + m
+	}
+	return ""
+}
+
+// lastSessionID returns the id from the last match whose prefix is a
+// plausible remnant of "session", so the newest announcement wins.
+func lastSessionID(re *regexp.Regexp, text string) string {
+	all := re.FindAllStringSubmatch(text, -1)
+	for i := len(all) - 1; i >= 0; i-- {
+		if isDamagedSessionPrefix(all[i][1]) {
+			return "session_" + all[i][2]
+		}
 	}
 	return ""
 }

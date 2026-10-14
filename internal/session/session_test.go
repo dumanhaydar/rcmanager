@@ -637,3 +637,53 @@ func TestAFailedStartReleasesTheConversation(t *testing.T) {
 		t.Fatalf("the conversation was still locked by the failed start: %+v", r)
 	}
 }
+
+// An adopted session announced its URL before this daemon existed, but the TUI
+// reprints the banner on every repaint. Measuring the announcement window from
+// the session's original start meant an adopted session whose URL was never
+// recorded could never acquire one, and the watchdog complained about it for
+// as long as it ran.
+func TestAnAdoptedSessionCanStillLearnItsURL(t *testing.T) {
+	withHome(t)
+	p := fake{
+		script: `while true; do echo "remote control is active at URL=https://example.test/session_adopted"; sleep 1; done`,
+		url:    regexp.MustCompile(`URL=(\S+)`),
+	}
+	first := New(mustEntry(t, "demo", "learns-late", t.TempDir()), p, Options{Config: testConfig()})
+	defer first.Dispose()
+	first.Start(false)
+	waitFor(t, "the session to come online", func() bool { return first.Status() == Online })
+
+	saved := first.Persisted()
+	// A session whose URL was never captured, and which started long enough
+	// ago that a window measured from then would be closed.
+	saved.RemoteURL = ""
+	saved.StartedAt = time.Now().Add(-2 * urlWindow).UnixMilli()
+	first.Detach()
+
+	second := New(mustEntry(t, "demo", "learns-late", first.Entry().Cwd), p, Options{Config: testConfig()})
+	defer func() {
+		second.Stop("test")
+		second.Dispose()
+	}()
+	second.SetSavedState(&saved)
+	if r := second.Start(false); !r.Adopted {
+		t.Fatalf("Start() = %+v, want an adoption", r)
+	}
+
+	waitFor(t, "the adopted session to learn its URL", func() bool { return second.View().RemoteURL != "" })
+	if got, want := second.View().RemoteURL, "https://example.test/session_adopted"; got != want {
+		t.Errorf("RemoteURL = %q, want %q", got, want)
+	}
+}
+
+func mustEntry(t *testing.T, name, sessionID, cwd string) *registry.Entry {
+	t.Helper()
+	e, err := registry.Normalize(&registry.Entry{
+		Name: name, Provider: "fake", SessionID: sessionID, Cwd: cwd, Enabled: true,
+	}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return e
+}

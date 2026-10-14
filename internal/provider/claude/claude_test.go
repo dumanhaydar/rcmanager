@@ -254,3 +254,44 @@ func TestInteractionPatternsMatchFlattenedOutput(t *testing.T) {
 		t.Errorf("the trust dialog was answered on the user's behalf: %q", got)
 	}
 }
+
+// Observed in the field: a session that was live and reachable the whole time,
+// whose announcement came out of the TUI with characters missing from the word
+// "session" — and which therefore had no URL recorded at all, while the
+// watchdog complained about it forever.
+func TestExtractRemoteURLSurvivesADamagedSessionPrefix(t *testing.T) {
+	text := "remote-control is active · Continue here, on your phone, or at " +
+		"https://claude.ai/code/ssion_01RDLippg3f1VTL2o8xpydE8"
+	want := "https://claude.ai/code/session_01RDLippg3f1VTL2o8xpydE8"
+	if got := (Provider{}).ExtractRemoteURL(text); got != want {
+		t.Fatalf("ExtractRemoteURL() = %q, want %q", got, want)
+	}
+
+	// Any remnant of the word, in order, is accepted.
+	for _, prefix := range []string{"session", "ssion", "sesion", "sion", "sn", "s"} {
+		text := "claude.ai/code/" + prefix + "_01RDLippg3f1VTL2o8xpydE8 "
+		if got := (Provider{}).ExtractRemoteURL(text); got != want {
+			t.Errorf("prefix %q: ExtractRemoteURL() = %q", prefix, got)
+		}
+	}
+}
+
+// Loose on the prefix must not mean loose on what counts as an id.
+func TestExtractRemoteURLStillRejectsUnrelatedTokens(t *testing.T) {
+	cases := []string{
+		// Not a remnant of "session": the letters are out of order.
+		"claude.ai/code/noise_01RDLippg3f1VTL2o8xpydE8 ",
+		"remote-control is active at claude.ai/code/xyz_01RDLippg3f1VTL2o8xpydE8 ",
+		// 23 characters: a damaged payload, which would resolve to nothing.
+		"claude.ai/code/session_01RDLippg3f1VTL2o8xpydE ",
+		// 25 characters: not an id either.
+		"claude.ai/code/session_01RDLippg3f1VTL2o8xpydE8X ",
+		// An id with no url and no announcement around it.
+		"the user pasted session_01RDLippg3f1VTL2o8xpydE8 into a message ",
+	}
+	for _, text := range cases {
+		if got := (Provider{}).ExtractRemoteURL(text); got != "" {
+			t.Errorf("ExtractRemoteURL(%q) = %q, want no URL", text, got)
+		}
+	}
+}

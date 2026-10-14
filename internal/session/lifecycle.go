@@ -219,6 +219,7 @@ func (m *Managed) spawnChild() Result {
 	m.signature = cmdSpec.Signature
 	m.launchedWith = entry
 	m.startedAt = time.Now()
+	m.urlWatchFrom = m.startedAt
 	m.adopted = false
 	m.stopping = false
 	m.updateLocked(func() {
@@ -600,6 +601,9 @@ func (m *Managed) tryAdopt(saved *Persisted) bool {
 		m.startedAt = time.Now()
 	}
 	m.adopted = true
+	// Whatever this session announced, it announced before this daemon could
+	// read it; the window starts now.
+	m.urlWatchFrom = time.Now()
 	m.remoteURL = saved.RemoteURL
 	m.restarts = saved.Restarts
 	m.scope = saved.Scope
