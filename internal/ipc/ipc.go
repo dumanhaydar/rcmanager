@@ -27,6 +27,7 @@ import (
 // Args is everything a daemon command can be asked to act on.
 type Args struct {
 	Name         string          `json:"name,omitempty"`
+	NewName      string          `json:"newName,omitempty"`
 	Entry        *registry.Entry `json:"entry,omitempty"`
 	Force        bool            `json:"force,omitempty"`
 	Reason       string          `json:"reason,omitempty"`

@@ -104,6 +104,9 @@ func (d *Daemon) handle(req ipc.Request, progress func(ipc.Progress)) (any, erro
 		}
 		return result.Status, nil
 
+	case "rename":
+		return d.rename(req.Args.Name, req.Args.NewName)
+
 	case "enable", "disable":
 		return d.toggle(req.Args.Name, req.Cmd == "enable")
 
@@ -145,6 +148,72 @@ func (d *Daemon) toggle(name string, on bool) (any, error) {
 	} else {
 		s.Stop("disabled")
 	}
+	d.persist()
+	return s.View(), nil
+}
+
+// rename moves a session to a new name, running or not.
+//
+// The registry entry moves with everything named after it — logs, raw capture
+// files, the stdin fifo — and the session keeps its id, so this renames the
+// handle rcmanager knows it by and nothing about the conversation underneath.
+func (d *Daemon) rename(oldName, newName string) (any, error) {
+	if newName == "" {
+		return nil, rcerr.New("rename needs a new name.", "Usage: rcmanager rename <name> <new-name>")
+	}
+	if err := registry.AssertValidName(newName); err != nil {
+		return nil, err
+	}
+	s, err := d.get(oldName)
+	if err != nil {
+		return nil, err
+	}
+	if newName == oldName {
+		return s.View(), nil
+	}
+
+	// Refuse rather than merge: two sessions quietly becoming one would lose
+	// whichever registry entry was overwritten.
+	d.mu.Lock()
+	_, taken := d.sessions[newName]
+	d.mu.Unlock()
+	if taken || registry.Get(newName) != nil {
+		return nil, rcerr.Newf("Pick another name, or remove that session first.",
+			"A session named %q is already registered.", newName)
+	}
+
+	entry := s.Entry().Clone()
+	entry.Name = newName
+	entry, err = registry.Normalize(entry, "")
+	if err != nil {
+		return nil, err
+	}
+
+	if err := s.Rename(entry); err != nil {
+		return nil, rcerr.Newf("", "could not rename %q: %v", oldName, err)
+	}
+
+	// The registry is only touched once the session itself has moved, so a
+	// failure above leaves the document describing what is really on disk.
+	if _, err := registry.Upsert(entry); err != nil {
+		return nil, err
+	}
+	if _, err := registry.Remove(oldName); err != nil {
+		return nil, err
+	}
+
+	d.mu.Lock()
+	delete(d.sessions, oldName)
+	d.sessions[newName] = s
+	for i, n := range d.order {
+		if n == oldName {
+			d.order[i] = newName
+			break
+		}
+	}
+	d.mu.Unlock()
+
+	d.line(oldName + " renamed to " + newName)
 	d.persist()
 	return s.View(), nil
 }

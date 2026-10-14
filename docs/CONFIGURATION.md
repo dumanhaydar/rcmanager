@@ -98,6 +98,35 @@ Saving a file is not permission to restart an agent mid-thought.
 - Sessions added, removed, enabled or disabled do move: that is an explicit
   instruction either way.
 
+## Renaming a session
+
+```sh
+rcmanager rename old-name new-name
+```
+
+The name is rcmanager's handle for a session, so renaming is bookkeeping: the
+registry entry, the logs, the raw capture files and the stdin fifo all move to
+the new name, and the agent keeps running throughout — the files are renamed,
+not recreated, so the running process keeps writing to the same inodes and
+capture resumes at the byte it had reached.
+
+Two things deliberately do not change:
+
+- **The conversation.** The session id is untouched, so this is the same
+  conversation under a new label. `remove` and `rename` both leave transcripts
+  alone.
+- **The provider's own record.** Claude stores the display name a session was
+  *created* with, and rcmanager does not rewrite other programs' metadata. So
+  `rcmanager discover` still lists it under the old title, and resuming it by
+  name on a fresh machine means the old name. `rcmanager info` always shows
+  both the current name and the session id.
+
+For a provider that puts the session name on its command line — a Claude
+environment, or a Codex session — the process that is already running was
+launched under the old name. rcmanager says so and flags the session for a
+restart rather than pretending otherwise, and the signature interlock keeps
+describing the live process so stopping it still works.
+
 ## Provider options
 
 ### Claude Code (`claude`)

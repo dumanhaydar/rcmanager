@@ -26,6 +26,9 @@ type fake struct {
 	script string
 	url    *regexp.Regexp
 	prompt bool
+	// nameInSignature mimics a provider that puts the session name on the
+	// command line, the way a Claude environment or Codex session does.
+	nameInSignature bool
 }
 
 func (fake) ID() string                                { return "fake" }
@@ -41,11 +44,15 @@ func (f fake) Capabilities() provider.Capabilities {
 }
 
 func (f fake) BuildCommand(e *registry.Entry) (provider.Command, error) {
+	signature := []string{"sh", marker}
+	if f.nameInSignature {
+		signature = append(signature, e.Name)
+	}
 	return provider.Command{
 		Command:   "sh",
-		Args:      []string{"-c", "# " + marker + "\n" + f.script},
+		Args:      []string{"-c", "# " + marker + " " + e.Name + "\n" + f.script},
 		Cwd:       e.Cwd,
-		Signature: []string{"sh", marker},
+		Signature: signature,
 	}, nil
 }
 
@@ -356,4 +363,126 @@ func TestStartCaptureWithOutputAlreadyPresentDoesNotDeadlock(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 	}
 	t.Error("the output that was already in the raw file never reached the log")
+}
+
+// Renaming a running session must move everything named after it without the
+// agent noticing: same process, same conversation, and capture that carries on
+// into the renamed log.
+func TestRenameKeepsTheSessionRunningAndCapturing(t *testing.T) {
+	withHome(t)
+	p := fake{
+		script: `echo "before the rename"; sleep 0.4; echo "MARKER after the rename"; while true; do sleep 1; done`,
+	}
+	s := newSession(t, p, testConfig())
+	s.Start(false)
+	waitFor(t, "the session to come online", func() bool { return s.Status() == Online })
+
+	pid := s.Pid()
+	oldLog := paths.LogPaths("demo").Out
+	oldFifo := s.io.Files.Stdin
+
+	entry := s.Entry().Clone()
+	entry.Name = "renamed"
+	normalized, err := registry.Normalize(entry, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Rename(normalized); err != nil {
+		t.Fatal(err)
+	}
+
+	if s.Name() != "renamed" {
+		t.Errorf("Name() = %q after rename", s.Name())
+	}
+	if s.Pid() != pid {
+		t.Errorf("the agent was restarted: pid %d → %d", pid, s.Pid())
+	}
+	if !procs.IsAlive(pid) {
+		t.Fatal("the agent was killed by the rename")
+	}
+	if s.View().SessionID != normalized.SessionID {
+		t.Error("the session id changed, so this would be a different conversation")
+	}
+
+	// The files moved rather than being left behind under the old name.
+	if _, err := os.Stat(oldLog); !os.IsNotExist(err) {
+		t.Errorf("the old log file is still there: %v", err)
+	}
+	if _, err := os.Stat(oldFifo); !os.IsNotExist(err) {
+		t.Errorf("the old stdin fifo is still there: %v", err)
+	}
+	newLog := paths.LogPaths("renamed").Out
+	if _, err := os.Stat(newLog); err != nil {
+		t.Fatalf("no log under the new name: %v", err)
+	}
+
+	// Output written after the rename still reaches the renamed log, which is
+	// what proves capture followed the files rather than tailing a dead path.
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		if raw, err := os.ReadFile(newLog); err == nil && strings.Contains(string(raw), "MARKER after the rename") {
+			if !strings.Contains(string(raw), "before the rename") {
+				t.Error("the history from before the rename was lost")
+			}
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatal("output written after the rename never reached the renamed log")
+}
+
+// A provider that carries the session name in its command line is launching
+// something the new name no longer describes, so the session says so instead
+// of pretending the rename took full effect.
+func TestRenameFlagsAProviderThatNamesItsProcess(t *testing.T) {
+	withHome(t)
+	s := newSession(t, fake{script: `while true; do sleep 1; done`, nameInSignature: true}, testConfig())
+	s.Start(false)
+	waitFor(t, "the session to come online", func() bool { return s.Status() == Online })
+
+	entry := s.Entry().Clone()
+	entry.Name = "renamed"
+	normalized, _ := registry.Normalize(entry, "")
+	if err := s.Rename(normalized); err != nil {
+		t.Fatal(err)
+	}
+
+	view := s.View()
+	if len(view.NeedsRestart) != 1 || view.NeedsRestart[0] != "name" {
+		t.Errorf("NeedsRestart = %v, want [name]", view.NeedsRestart)
+	}
+	if !strings.Contains(view.Message, "restart to apply") {
+		t.Errorf("message = %q", view.Message)
+	}
+
+	// The signature still describes the live process, or rcmanager would have
+	// lost the right to signal its own child.
+	if r := s.Stop("test"); !r.OK {
+		t.Errorf("Stop() after a rename = %+v — the interlock stopped matching", r)
+	}
+}
+
+// Renaming a stopped session is just bookkeeping, and must still move its logs.
+func TestRenameAStoppedSession(t *testing.T) {
+	withHome(t)
+	s := newSession(t, fake{script: `exit 0`}, testConfig())
+	s.log("a line from before the rename")
+
+	entry := s.Entry().Clone()
+	entry.Name = "renamed"
+	normalized, _ := registry.Normalize(entry, "")
+	if err := s.Rename(normalized); err != nil {
+		t.Fatal(err)
+	}
+
+	raw, err := os.ReadFile(paths.LogPaths("renamed").Out)
+	if err != nil {
+		t.Fatalf("no log under the new name: %v", err)
+	}
+	if !strings.Contains(string(raw), "a line from before the rename") {
+		t.Error("the log history did not follow the rename")
+	}
+	if s.View().Status != Stopped {
+		t.Errorf("status = %q, want it left alone", s.View().Status)
+	}
 }

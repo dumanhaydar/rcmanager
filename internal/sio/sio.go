@@ -167,6 +167,42 @@ func (io *IO) Close() {
 	}
 }
 
+// Rename moves a session's stdio files to the ones a new name implies.
+//
+// The files are renamed, never recreated: a running child holds descriptors on
+// those inodes, and rename(2) leaves an inode alone, so the agent keeps
+// writing to the same place without ever learning it is called something else
+// now. Recreating them would strand its output in an unlinked file.
+func (io *IO) Rename(newName string) error {
+	io.mu.Lock()
+	defer io.mu.Unlock()
+
+	if err := paths.EnsureHome(); err != nil {
+		return err
+	}
+	next := paths.IOPaths(newName)
+
+	for _, move := range [][2]string{
+		{io.Files.Stdin, next.Stdin},
+		{io.Files.Out, next.Out},
+		{io.Files.Err, next.Err},
+	} {
+		if move[0] == move[1] {
+			continue
+		}
+		if _, err := os.Stat(move[0]); err != nil {
+			continue // nothing there yet: the new name simply starts clean
+		}
+		if err := os.Rename(move[0], move[1]); err != nil {
+			return err
+		}
+	}
+
+	io.Name = newName
+	io.Files = next
+	return nil
+}
+
 // Destroy removes the fifo and raw files. Only for a session being
 // unregistered.
 func (io *IO) Destroy() {

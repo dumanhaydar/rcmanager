@@ -142,12 +142,14 @@ func serviceUninstall(flags Flags) error {
 		ui.Info(n)
 	}
 
-	// Only some managers actually own the running process; say what happened
-	// rather than assuming.
+	// Only some managers actually own the running process, and stopping the
+	// supervisor is not stopping the work: say exactly what is known rather
+	// than inferring the sessions' fate from the daemon's.
 	after := client.DaemonInfo()
 	switch {
 	case before && !after.Alive:
-		ui.Info("the daemon and its sessions were stopped; the conversations are untouched")
+		ui.Info("the daemon was stopped; managed sessions keep running until something stops them")
+		ui.Info("`rcmanager ls` still reports them once a daemon is running again")
 	case after.Alive:
 		ui.Info(fmt.Sprintf("the daemon is still running (pid %d) — stop it with `rcmanager daemon --stop`", after.Pid))
 	}

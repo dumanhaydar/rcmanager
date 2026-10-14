@@ -341,6 +341,37 @@ func remove(args []string, flags Flags) error {
 	return nil
 }
 
+// rename changes the name rcmanager knows a session by.
+//
+// The conversation is untouched: the session id does not change, and the agent
+// keeps running. What moves is everything rcmanager named after the session —
+// its registry entry, its logs, its capture files.
+func rename(args []string, flags Flags) error {
+	if len(args) < 2 || args[0] == "" || args[1] == "" {
+		return rcerr.New("Usage: rcmanager rename <name> <new-name>",
+			"The session keeps running, and its conversation is untouched.")
+	}
+	oldName, newName := args[0], args[1]
+
+	var status session.View
+	if err := client.Call("rename", ipc.Args{Name: oldName, NewName: newName}, &status,
+		client.Options{Autostart: flags.Autostart(), Timeout: 120 * time.Second}); err != nil {
+		return err
+	}
+
+	ui.OK(ansi.Bold(oldName) + " → " + ansi.Bold(newName))
+	if status.Message != "" {
+		ui.Info(status.Message)
+	}
+	// Worth saying plainly: the provider's own record of the session keeps the
+	// name it was created with, so discovery still finds it by the old one.
+	if p, err := provider.Get(status.Provider); err == nil && p.Capabilities().NamedSessions {
+		ui.Info("this is rcmanager's name for it — " + p.DisplayName() +
+			" still records the session under the name it was created with")
+	}
+	return nil
+}
+
 func enable(args []string, flags Flags) error  { return toggle(args, flags, "enable") }
 func disable(args []string, flags Flags) error { return toggle(args, flags, "disable") }
 

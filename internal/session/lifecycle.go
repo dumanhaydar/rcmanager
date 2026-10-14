@@ -5,11 +5,13 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
 	"github.com/dumanhaydar/rcmanager/internal/isolate"
+	"github.com/dumanhaydar/rcmanager/internal/paths"
 	"github.com/dumanhaydar/rcmanager/internal/procs"
 	"github.com/dumanhaydar/rcmanager/internal/provider"
 	"github.com/dumanhaydar/rcmanager/internal/ptywrap"
@@ -781,4 +783,113 @@ func flattenEnv(env map[string]string) []string {
 		out = append(out, k+"="+v)
 	}
 	return out
+}
+
+// Rename moves a live session to a new name.
+//
+// Everything named after the session moves with it: its logs, its raw capture
+// files and its stdin fifo. They are renamed rather than recreated, so a
+// running agent keeps writing to the same inodes and never notices — and
+// capture resumes at the offset it had reached, so no output is replayed or
+// skipped.
+//
+// What does *not* change is the recorded signature. It describes the process
+// that is actually running, which was launched under the old name, and the
+// interlock in package procs has to keep matching it or rcmanager would lose
+// the right to signal its own child. When the new name would change how the
+// session launches — a provider that puts the name in its command line — the
+// session is flagged as needing a restart, the same as any other
+// launch-affecting edit.
+func (m *Managed) Rename(entry *registry.Entry) error {
+	oldName := m.Name()
+
+	m.mu.Lock()
+	offsets := m.captureOffsetsLocked()
+	m.stopCaptureLocked()
+
+	if m.out != nil {
+		m.out.Close()
+	}
+	if m.err != nil {
+		m.err.Close()
+	}
+	m.out, m.err = nil, nil
+
+	if err := renameLogs(m.logFiles, paths.LogPaths(entry.Name), m.cfg.LogRetain); err != nil {
+		m.mu.Unlock()
+		return err
+	}
+	if err := m.io.Rename(entry.Name); err != nil {
+		m.mu.Unlock()
+		return err
+	}
+
+	m.entry = entry
+	m.logFiles = paths.LogPaths(entry.Name)
+	m.openLogsLocked()
+	m.logLocked("renamed from " + oldName)
+
+	running := m.status == Online || m.status == Launching
+	if running {
+		m.startCaptureLocked(offsets)
+	} else {
+		m.captureAt = offsets
+	}
+
+	// A provider that carries the session name in its argv is launching
+	// something the new name no longer describes.
+	if running && len(m.signature) > 0 {
+		if cmd, err := m.prov.BuildCommand(entry); err == nil && !sameSignature(cmd.Signature, m.signature) {
+			msg := "renamed, but the running process was launched as " + oldName +
+				" — restart to apply: rcmanager restart " + entry.Name
+			m.updateLocked(func() {
+				m.needsRestart = []string{"name"}
+				m.message = msg
+			})
+			m.logLocked(msg)
+		}
+	}
+	m.mu.Unlock()
+
+	m.onChange()
+	return nil
+}
+
+func sameSignature(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// renameLogs moves the human-readable logs, rotations included, so `rcmanager
+// logs <new-name>` shows the history the session actually has.
+func renameLogs(from, to paths.LogFiles, retain int) error {
+	if retain < 1 {
+		retain = 1
+	}
+	for _, pair := range [][2]string{{from.Out, to.Out}, {from.Err, to.Err}} {
+		if pair[0] == pair[1] {
+			continue
+		}
+		for i := 0; i <= retain; i++ {
+			suffix := ""
+			if i > 0 {
+				suffix = "." + strconv.Itoa(i)
+			}
+			src, dst := pair[0]+suffix, pair[1]+suffix
+			if _, err := os.Stat(src); err != nil {
+				continue
+			}
+			if err := os.Rename(src, dst); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }

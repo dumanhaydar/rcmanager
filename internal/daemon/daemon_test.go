@@ -279,3 +279,72 @@ func TestSessionIDIsAssignedForResumeCapableProviders(t *testing.T) {
 }
 
 func processAlive(pid int) bool { return procs.IsAlive(pid) }
+
+// Renaming over IPC moves the registry entry and the daemon's own index of
+// sessions, so the old name stops answering and the new one takes over.
+func TestRenameOverIPC(t *testing.T) {
+	d, socket := start(t)
+	work := t.TempDir()
+
+	entry := &registry.Entry{Name: "before", Provider: "fake", Cwd: work, Enabled: true}
+	if err := call(t, socket, "register", ipc.Args{Entry: entry}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := call(t, socket, "start", ipc.Args{Name: "before"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "the session to come online", func() bool {
+		s, _ := d.get("before")
+		return s.Status() == session.Online
+	})
+	s, _ := d.get("before")
+	pid := s.Pid()
+
+	var view session.View
+	if err := call(t, socket, "rename", ipc.Args{Name: "before", NewName: "after"}, &view); err != nil {
+		t.Fatal(err)
+	}
+	if view.Name != "after" || view.Pid != pid {
+		t.Fatalf("rename returned %+v, want name after and pid %d", view, pid)
+	}
+
+	if registry.Get("before") != nil {
+		t.Error("the old entry is still in the registry")
+	}
+	if got := registry.Get("after"); got == nil {
+		t.Error("the new entry is not in the registry")
+	} else if got.SessionID != entry.SessionID {
+		t.Error("the session id changed, so this is no longer the same conversation")
+	}
+
+	if _, err := d.get("before"); err == nil {
+		t.Error("the daemon still answers for the old name")
+	}
+	var listed []session.View
+	if err := call(t, socket, "list", ipc.Args{}, &listed); err != nil {
+		t.Fatal(err)
+	}
+	if len(listed) != 1 || listed[0].Name != "after" {
+		t.Errorf("list = %+v", listed)
+	}
+
+	// Renaming onto a name that is taken would quietly destroy one of the two.
+	second := &registry.Entry{Name: "other", Provider: "fake", Cwd: work, Enabled: false}
+	if err := call(t, socket, "register", ipc.Args{Entry: second}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := call(t, socket, "rename", ipc.Args{Name: "after", NewName: "other"}, nil); err == nil {
+		t.Error("renaming onto an existing session was allowed")
+	}
+	if err := call(t, socket, "rename", ipc.Args{Name: "after", NewName: "not a valid name"}, nil); err == nil {
+		t.Error("an unusable name was accepted")
+	}
+	if err := call(t, socket, "rename", ipc.Args{Name: "nope", NewName: "x"}, nil); err == nil {
+		t.Error("renaming an unregistered session was allowed")
+	}
+
+	// After all that, the session is still itself.
+	if s, err := d.get("after"); err != nil || s.Pid() != pid {
+		t.Errorf("the session did not survive the refused renames: %v", err)
+	}
+}

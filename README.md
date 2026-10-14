@@ -236,6 +236,7 @@ a blank import.
 | `rcmanager start all` · `stop all` · `restart all` | Act on everything, with live progress |
 | `rcmanager start <file.json>` | Register and start an ecosystem file |
 | `rcmanager stop` · `restart` · `remove <name>` | `remove` never deletes the conversation |
+| `rcmanager rename <name> <new-name>` | Renames the handle; the session keeps running |
 | `rcmanager enable` · `disable <name>` | Autostart on and start now · stop and stay stopped |
 | `rcmanager ls` · `status` · `info <name>` | `--json` everywhere |
 | `rcmanager logs [name] [-n N] [-f]` | Per-session logs, ANSI-stripped and rotated |
