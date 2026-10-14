@@ -269,16 +269,19 @@ asks:
 | | |
 | --- | --- |
 | Memory | 250–400 MB per agent session — that is the agent CLI itself, and it is the real cost |
-| CPU, sessions idle | **0.6 %** of one core for the supervisor and all ten sessions |
+| CPU, sessions idle | **0.3 %** of one core for the supervisor and all ten sessions |
 | CPU, agents repainting their TUIs | **2.6 %** of one core for eight of them at once |
 | Disk | under a megabyte of state; logs rotate, raw capture truncates itself |
 | Tokens | none. Nothing queries the model until you send a message |
 
-The supervisor was three times that before it was profiled: the cost was
-regexes run over kilobytes of repaint on every write, and polling files five
-times a second for sessions that print nothing all day. Both are fixed, and
-`kill -USR1 <daemon pid>` writes a 30-second CPU profile into
-`$RCMANAGER_HOME` if you want to check the claim on your own machine.
+The supervisor was four times that before it was profiled: regexes run over
+kilobytes of repaint on every write, files polled five times a second for
+sessions that print nothing all day, and an adopted session's command line
+re-read every five seconds to catch a recycled pid — which on macOS means
+forking `ps`, eleven times over, twelve times a minute. All three are fixed,
+and `kill -USR1 <daemon pid>` writes a 30-second CPU profile into
+`$RCMANAGER_HOME` if you want to check the claim on your own machine rather
+than take it from a README.
 
 What does grow is the conversation. A session left running for weeks
 accumulates context, and every message in a large one costs more — `rcmanager

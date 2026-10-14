@@ -250,7 +250,7 @@ interactively, with `codex remote-control pair`.
 
 ## Performance, and how to check it
 
-Ten idle supervised sessions cost the daemon about 0.6 % of one core; eight
+Ten idle supervised sessions cost the daemon about 0.3 % of one core; eight
 agents repainting their TUIs at once cost about 2.6 %. The agent processes
 themselves are the expensive part, at 250–400 MB each.
 
@@ -267,6 +267,14 @@ Two things keep the supervisor cheap, and both are visible in behaviour:
   times a second while output is flowing and once a second after five seconds
   of silence, snapping back on the first byte. The cost is that a prompt
   arriving after a long silence is answered up to a second later.
+- **An adopted session's liveness is cheap to check; its identity is not.**
+  A process rcmanager adopted is not its child, so there is no exit to wait
+  for and it has to be polled. Asking whether the pid exists is a signal with
+  no target and runs every five seconds; re-reading its command line to catch
+  a recycled pid means reading `/proc` — or forking `ps`, on a system without
+  one — so it runs about once a minute. Nothing is acted on in between, and
+  every kill re-reads the command line before it signals anything, so the
+  worst this can cost is noticing a recycled pid a minute later.
 
 If you want to check any of this on your own machine rather than take it on
 faith:

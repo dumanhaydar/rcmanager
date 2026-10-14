@@ -650,27 +650,44 @@ func (m *Managed) tryAdopt(saved *Persisted) bool {
 	m.mu.Unlock()
 
 	// An adopted process is not our child, so there is no Wait to block on:
-	// poll the signature instead and treat its disappearance as an exit.
+	// poll instead, and treat its disappearance as an exit.
+	//
+	// Liveness is a signal with no target, which costs nothing, and it is
+	// checked every tick. The argv check behind it guards against a pid that
+	// was recycled by an unrelated process — and on a system without /proc it
+	// means forking ps, which for a dozen adopted sessions is most of what the
+	// supervisor does all day. It runs every adoptVerifyEvery ticks instead,
+	// because nothing is acted on in between: procs.Terminate re-reads the
+	// argv before it signals anything, so the worst a slower check can cost is
+	// noticing a recycled pid a minute later than a dead one.
 	go func() {
-		ticker := time.NewTicker(5 * time.Second)
+		ticker := time.NewTicker(adoptPollInterval)
 		defer ticker.Stop()
+		ticks := 0
 		for {
 			select {
 			case <-stop:
 				return
 			case <-ticker.C:
-				if procs.IsAlive(pid) && procs.MatchesSignature(pid, signature) {
-					continue
-				}
-				m.mu.Lock()
-				if m.adoptStop == stop {
-					m.adoptStop = nil
-					m.adopted = false
-				}
-				m.mu.Unlock()
-				m.handleExit(-1, "ADOPTED_EXIT")
-				return
 			}
+
+			ticks++
+			gone := !procs.IsAlive(pid)
+			if !gone && ticks%adoptVerifyEvery == 0 {
+				gone = !procs.MatchesSignature(pid, signature)
+			}
+			if !gone {
+				continue
+			}
+
+			m.mu.Lock()
+			if m.adoptStop == stop {
+				m.adoptStop = nil
+				m.adopted = false
+			}
+			m.mu.Unlock()
+			m.handleExit(-1, "ADOPTED_EXIT")
+			return
 		}
 	}()
 	return true

@@ -46,6 +46,13 @@ const (
 // the announcement.
 const urlWindow = 5 * time.Minute
 
+// How often an adopted process is checked, and how often that check also
+// verifies the argv rather than just the pid's existence.
+const (
+	adoptPollInterval = 5 * time.Second
+	adoptVerifyEvery  = 12 // so the argv is read about once a minute
+)
+
 // urlWatchdog is how long to wait for the remote-control URL before saying so.
 //
 // "online" has to mean reachable, not merely alive. A session stalled on an

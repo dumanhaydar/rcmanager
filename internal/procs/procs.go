@@ -19,6 +19,12 @@ type Proc struct {
 
 // IsAlive reports whether a pid exists and could be signalled. EPERM counts:
 // the process exists, it just belongs to someone else.
+//
+// A zombie counts as alive, because signalling one succeeds. That is correct
+// for every caller here: rcmanager reaps its own children as they exit, and an
+// adopted process belongs to someone else's process tree, which reaps it. The
+// one place it would mislead is code that waits for a process it does not own
+// and never reaps — don't write that.
 func IsAlive(pid int) bool {
 	if pid <= 0 {
 		return false
