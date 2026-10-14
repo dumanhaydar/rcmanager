@@ -1,0 +1,193 @@
+# rcmanager — build, test, install and deploy.
+#
+# Run `task` with no arguments to list everything.
+# Requires go-task (https://taskfile.dev): brew install go-task
+version: '3'
+
+vars:
+  # The local build output. Everything else is derived from it.
+  BIN: bin/rcmanager
+  # Where `task install` puts the binary. Override with PREFIX=/usr/local.
+  PREFIX: '{{.PREFIX | default "~/.local"}}'
+  # Platforms `task dist` builds for.
+  PLATFORMS: darwin/arm64 darwin/amd64 linux/amd64 linux/arm64
+  # The version stamped into a build. Defaults to the git description, so a
+  # local binary says which commit it came from; a release passes the tag.
+  VERSION:
+    sh: git describe --tags --always --dirty 2>/dev/null | sed 's/^v//' || echo dev
+  LDFLAGS: -s -w -X github.com/dumanhaydar/rcmanager/internal/version.Version={{.VERSION}}
+
+tasks:
+  default:
+    desc: List the available tasks
+    silent: true
+    cmds: ['task --list']
+
+  # ----------------------------------------------------------------- building
+
+  build:
+    desc: Build the rcmanager binary into ./bin
+    sources: ['**/*.go', go.mod]
+    generates: ['{{.BIN}}']
+    cmds:
+      - go build -ldflags "{{.LDFLAGS}}" -o {{.BIN}} ./cmd/rcmanager
+      - cmd: '{{.BIN}} --version | sed "s/^/built rcmanager /"'
+        silent: true
+
+  dist:
+    desc: Cross-compile for every supported platform into ./bin/dist
+    deps: [check]
+    cmds:
+      - rm -rf bin/dist && mkdir -p bin/dist
+      - for: {var: PLATFORMS, split: ' ', as: PLATFORM}
+        cmd: |
+          os="$(echo '{{.PLATFORM}}' | cut -d/ -f1)"
+          arch="$(echo '{{.PLATFORM}}' | cut -d/ -f2)"
+          GOOS="$os" GOARCH="$arch" CGO_ENABLED=0 \
+            go build -trimpath -ldflags "{{.LDFLAGS}}" -o "bin/dist/rcmanager-$os-$arch" ./cmd/rcmanager
+      - cmd: ls -lh bin/dist
+        silent: true
+
+  install:
+    desc: Install the binary into $PREFIX/bin (default ~/.local/bin)
+    deps: [build]
+    cmds:
+      - install -d {{.PREFIX}}/bin
+      - install -m 755 {{.BIN}} {{.PREFIX}}/bin/rcmanager
+      - cmd: 'echo "installed {{.PREFIX}}/bin/rcmanager — next: rcmanager setup"'
+        silent: true
+
+  uninstall:
+    desc: Remove the installed binary (leaves $RCMANAGER_HOME alone)
+    cmds:
+      - rm -f {{.PREFIX}}/bin/rcmanager
+
+  tidy:
+    desc: Tidy go.mod
+    cmds: ['go mod tidy']
+
+  clean:
+    desc: Remove build output
+    cmds: ['rm -rf bin']
+
+  # ------------------------------------------------------------------ quality
+
+  fmt:
+    desc: Format every Go file in place
+    cmds: ['gofmt -l -w .']
+
+  fmt:check:
+    desc: Fail if anything is unformatted
+    silent: true
+    cmds:
+      - |
+        unformatted="$(gofmt -l . )"
+        if [ -n "$unformatted" ]; then
+          echo "gofmt needed:"; echo "$unformatted"; exit 1
+        fi
+
+  vet:
+    desc: Run go vet
+    cmds: ['go vet ./...']
+
+  test:
+    desc: Run the test suite
+    cmds: ['go test ./...']
+
+  test:race:
+    desc: Run the test suite under the race detector
+    # The supervision tests drive real processes, fifos and ptys; the race
+    # detector is where a supervisor's bugs actually show up.
+    cmds: ['go test -race ./...']
+
+  test:cover:
+    desc: Run the tests and open the coverage report
+    cmds:
+      - go test -coverprofile=bin/coverage.out ./...
+      - go tool cover -func=bin/coverage.out | tail -1
+      - go tool cover -html=bin/coverage.out -o bin/coverage.html
+      - cmd: 'echo "report at bin/coverage.html"'
+        silent: true
+
+  check:
+    desc: Everything CI should run — formatting, vet and the race suite
+    cmds:
+      - task: fmt:check
+      - task: vet
+      - task: test:race
+
+  # --------------------------------------------------------------- running it
+
+  run:
+    desc: 'Run a command against the local install, e.g. task run -- list'
+    deps: [build]
+    cmds: ['{{.BIN}} {{.CLI_ARGS}}']
+
+  daemon:
+    desc: Run the supervisor in the foreground (what the service runs)
+    deps: [build]
+    cmds: ['{{.BIN}} daemon --foreground']
+
+  status:
+    desc: Show the local daemon and session status
+    deps: [build]
+    cmds:
+      - '{{.BIN}} daemon --status'
+      - '{{.BIN}} list'
+
+  # ------------------------------------------------------------------- deploy
+  #
+  # Deploying builds for whatever the remote machine actually is, rather than
+  # assuming it matches this one, and never touches anything but the binary:
+  # $RCMANAGER_HOME, the registry and any running session are left alone. Boot
+  # registration stays an explicit `rcmanager service install` over there.
+
+  deploy:
+    desc: 'Build for a remote host and install it there: task deploy HOST=user@host'
+    requires: {vars: [HOST]}
+    vars:
+      REMOTE_PREFIX: '{{.REMOTE_PREFIX | default "~/.local"}}'
+    cmds:
+      - |
+        set -e
+        read -r os arch <<EOS
+        $(ssh {{.HOST}} 'uname -s; uname -m' | tr '\n' ' ')
+        EOS
+        goos="$(echo "$os" | tr '[:upper:]' '[:lower:]')"
+        case "$arch" in
+          arm64|aarch64) goarch=arm64 ;;
+          x86_64|amd64)  goarch=amd64 ;;
+          *) echo "unsupported remote architecture: $arch" >&2; exit 1 ;;
+        esac
+        echo "remote is $goos/$goarch"
+
+        mkdir -p bin
+        GOOS="$goos" GOARCH="$goarch" CGO_ENABLED=0 \
+          go build -trimpath -ldflags "{{.LDFLAGS}}" -o "bin/rcmanager-$goos-$goarch" ./cmd/rcmanager
+
+        # Staged in a temporary file and moved into place, so a half-copied
+        # binary is never what the next command runs.
+        scp -q "bin/rcmanager-$goos-$goarch" {{.HOST}}:/tmp/rcmanager.incoming
+        ssh {{.HOST}} "mkdir -p {{.REMOTE_PREFIX}}/bin && chmod 755 /tmp/rcmanager.incoming && mv /tmp/rcmanager.incoming {{.REMOTE_PREFIX}}/bin/rcmanager"
+        echo "installed on {{.HOST}}: $(ssh {{.HOST}} '{{.REMOTE_PREFIX}}/bin/rcmanager --version')"
+
+  deploy:status:
+    desc: 'Report rcmanager on a remote host: task deploy:status HOST=user@host'
+    requires: {vars: [HOST]}
+    vars:
+      REMOTE_PREFIX: '{{.REMOTE_PREFIX | default "~/.local"}}'
+    cmds:
+      - |
+        ssh {{.HOST}} '{{.REMOTE_PREFIX}}/bin/rcmanager --version | sed "s/^/version /"; \
+          {{.REMOTE_PREFIX}}/bin/rcmanager daemon --status; \
+          {{.REMOTE_PREFIX}}/bin/rcmanager providers 2>/dev/null | head -6'
+
+  deploy:uninstall:
+    desc: 'Remove rcmanager from a remote host (leaves its state): task deploy:uninstall HOST=user@host'
+    requires: {vars: [HOST]}
+    vars:
+      REMOTE_PREFIX: '{{.REMOTE_PREFIX | default "~/.local"}}'
+    cmds:
+      - ssh {{.HOST}} 'rm -f {{.REMOTE_PREFIX}}/bin/rcmanager'
+      - cmd: 'echo "removed the binary from {{.HOST}}; its ~/.rcmanager was left in place"'
+        silent: true

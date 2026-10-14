@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    # The supervision tests spawn real processes, fifos and ptys, so they are
+    # run on both of the platforms rcmanager actually supervises agents on.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          check-latest: true
+
+      - name: gofmt
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "::error::these files need gofmt:"; echo "$unformatted"; exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go test -race
+        # A supervisor bug shows up as a hang, not a failed assertion. A tight
+        # timeout turns that into a red build in two minutes instead of ten.
+        run: go test -race -timeout 2m ./...
+
+      - name: cross-compile every release target
+        run: |
+          for platform in darwin/arm64 darwin/amd64 linux/amd64 linux/arm64; do
+            GOOS="${platform%/*}" GOARCH="${platform#*/}" CGO_ENABLED=0 \
+              go build -trimpath -o /dev/null ./cmd/rcmanager
+          done

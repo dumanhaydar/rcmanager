@@ -1,0 +1,80 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to build and release (e.g. v1.0.0)'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          check-latest: true
+
+      - name: Test before releasing
+        run: go test ./...
+
+      - name: Build every platform
+        id: build
+        run: |
+          set -eu
+          tag="${{ inputs.tag || github.ref_name }}"
+          version="${tag#v}"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          mkdir -p dist
+
+          # CGO_ENABLED=0 and -trimpath so the binaries are static and the
+          # build is reproducible from the tag alone.
+          for platform in darwin/arm64 darwin/amd64 linux/amd64 linux/arm64; do
+            os="${platform%/*}"; arch="${platform#*/}"
+            echo "building $os/$arch"
+            GOOS="$os" GOARCH="$arch" CGO_ENABLED=0 go build \
+              -trimpath -ldflags "-s -w -X github.com/dumanhaydar/rcmanager/internal/version.Version=$version" \
+              -o "dist/rcmanager" ./cmd/rcmanager
+            tar -czf "dist/rcmanager_${version}_${os}_${arch}.tar.gz" -C dist rcmanager
+            rm dist/rcmanager
+          done
+
+          cd dist && sha256sum *.tar.gz > SHA256SUMS && cat SHA256SUMS
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          tag="${{ steps.build.outputs.tag }}"
+          notes="$(mktemp)"
+          {
+            echo "## Install"
+            echo
+            echo '```sh'
+            echo "curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/main/install.sh | sh"
+            echo '```'
+            echo
+            echo "Or download the archive for your platform below, verify it against \`SHA256SUMS\`, and put \`rcmanager\` on your PATH."
+            echo
+            echo "Static binaries, no runtime dependencies. macOS and Linux, amd64 and arm64."
+          } > "$notes"
+
+          # Idempotent on a re-run: update the release rather than failing on it.
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" dist/* --clobber
+          else
+            gh release create "$tag" dist/* \
+              --title "rcmanager $tag" --notes-file "$notes" --verify-tag
+          fi

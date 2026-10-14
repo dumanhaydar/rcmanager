@@ -1,0 +1,22 @@
+{
+  "sessions": [
+    {
+      "name": "api-refactor",
+      "provider": "claude",
+      "cwd": "~/projects/api",
+      "enabled": true,
+      "note": "keeps the API refactor moving",
+      "providerOptions": {
+        "resumeMode": "summary"
+      }
+    },
+    {
+      "name": "docs",
+      "provider": "claude",
+      "cwd": "~/projects/docs",
+      "autostart": false,
+      "note": "started by hand when needed",
+      "restartDelayMs": 10000
+    }
+  ]
+}

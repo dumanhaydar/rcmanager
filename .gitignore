@@ -1,0 +1,10 @@
+# Build output. Anchored to the repository root on purpose: an unanchored
+# "rcmanager" would also match the cmd/rcmanager package directory.
+/bin/
+/rcmanager
+
+# go-task's local checksum cache.
+/.task/
+
+# Coverage output.
+*.out
