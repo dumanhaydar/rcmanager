@@ -10,6 +10,7 @@ import (
 
 	"github.com/dumanhaydar/rcmanager/internal/ansi"
 	"github.com/dumanhaydar/rcmanager/internal/client"
+	"github.com/dumanhaydar/rcmanager/internal/daemon"
 	"github.com/dumanhaydar/rcmanager/internal/format"
 	"github.com/dumanhaydar/rcmanager/internal/ipc"
 	"github.com/dumanhaydar/rcmanager/internal/provider"
@@ -368,6 +369,59 @@ func rename(args []string, flags Flags) error {
 	if p, err := provider.Get(status.Provider); err == nil && p.Capabilities().NamedSessions {
 		ui.Info("this is rcmanager's name for it — " + p.DisplayName() +
 			" still records the session under the name it was created with")
+	}
+	return nil
+}
+
+// reset points a session at a fresh conversation, keeping its name, directory
+// and options.
+//
+// `restart` resumes the same conversation — that is what the recorded session
+// id is for — so this is the command for a session whose context has grown
+// past being useful. Nothing is deleted: the previous conversation stays
+// where the provider keeps it.
+func reset(args []string, flags Flags) error {
+	name, err := requireName(args, "reset")
+	if err != nil {
+		return err
+	}
+
+	// A running session is mid-thought. Asking is cheap; losing the thread
+	// without being asked is not.
+	if ui.Interactive() && !flags.Bool("yes") {
+		var current session.View
+		if err := client.Call("describe", ipc.Args{Name: name}, &current,
+			client.Options{Autostart: flags.Autostart()}); err != nil {
+			return err
+		}
+		if current.Status == session.Online || current.Status == session.Launching {
+			ui.Warn(ansi.Bold(name) + " is running, and its conversation will be left behind")
+			ui.Info("nothing is deleted — the old conversation stays resumable by its id")
+			if !ui.Confirm("Start a fresh conversation for "+ansi.Bold(name)+"?", false) {
+				ui.Info("left alone")
+				return nil
+			}
+		}
+	}
+
+	result, err := ui.WithSpinner("resetting "+name, func() (daemon.ResetResult, error) {
+		var r daemon.ResetResult
+		err := client.Call("reset", ipc.Args{Name: name}, &r,
+			client.Options{Autostart: flags.Autostart(), Timeout: 180 * time.Second})
+		return r, err
+	})
+	if err != nil {
+		return err
+	}
+
+	ui.OK(ansi.Bold(name) + " now runs a fresh conversation " + ansi.Cyan(short(result.Status.SessionID, 8)))
+	if result.PreviousSessionID != "" {
+		ui.Info("the previous one (" + result.PreviousSessionID + ") was not deleted")
+	}
+	if result.Status.Pid != 0 {
+		printRemoteHint(result.Status)
+	} else {
+		ui.Info("it was not running, so nothing was started")
 	}
 	return nil
 }

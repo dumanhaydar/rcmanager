@@ -8,7 +8,6 @@ package logstream
 import (
 	"os"
 	"path/filepath"
-	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -24,23 +23,53 @@ type Options struct {
 	Strip    bool
 }
 
-// Spinner glyphs and progress marks an agent TUI repaints continuously. Left
-// in, they are the overwhelming majority of a session log.
-var decoration = regexp.MustCompile(`[\x{2500}-\x{257f}\x{2580}-\x{259f}\x{25a0}-\x{25ff}\x{2600}-\x{27bf}\x{2b00}-\x{2bff}*|/\\_.·╌─━]`)
+// isDecoration reports whether r is one of the spinner glyphs, box-drawing
+// characters and progress marks an agent TUI repaints continuously. Left in,
+// they are the overwhelming majority of a session log.
+//
+// Written as a range check rather than a character class: this runs on every
+// line of every session's output, and the regexp engine showed up in the
+// supervisor's profile for exactly this.
+func isDecoration(r rune) bool {
+	switch {
+	case r >= 0x2500 && r <= 0x257f, // box drawing
+		r >= 0x2580 && r <= 0x259f, // block elements
+		r >= 0x25a0 && r <= 0x25ff, // geometric shapes
+		r >= 0x2600 && r <= 0x27bf, // symbols, dingbats, braille spinners
+		r >= 0x2b00 && r <= 0x2bff: // arrows and symbols
+		return true
+	}
+	switch r {
+	case '*', '|', '/', '\\', '_', '.', '·', '╌', '─', '━':
+		return true
+	}
+	return false
+}
 
-var whitespace = regexp.MustCompile(`\s+`)
+// informative reports whether a line carries anything but repaint: once
+// whitespace and decoration are discounted, fewer than three characters left
+// means it said nothing. Real output — words, paths, urls — always survives.
+func informative(line string) bool {
+	kept := 0
+	for _, r := range line {
+		if r == ' ' || r == '\t' || r == '\n' || r == '\r' || r == '\v' || r == '\f' {
+			continue
+		}
+		if isDecoration(r) {
+			continue
+		}
+		if kept++; kept >= 3 {
+			return true
+		}
+	}
+	return false
+}
 
-// denoise drops repaint-only lines: once whitespace, box drawing and spinner
-// characters are removed, anything with fewer than three characters left
-// carried no information. Real output — words, paths, urls — always survives.
+// denoise drops repaint-only lines.
 func denoise(text string) string {
 	var kept []string
 	for _, line := range strings.Split(text, "\n") {
-		if strings.TrimSpace(line) == "" {
-			continue
-		}
-		stripped := whitespace.ReplaceAllString(decoration.ReplaceAllString(line, ""), "")
-		if len([]rune(stripped)) >= 3 {
+		if informative(line) {
 			kept = append(kept, line)
 		}
 	}

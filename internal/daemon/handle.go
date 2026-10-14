@@ -107,6 +107,9 @@ func (d *Daemon) handle(req ipc.Request, progress func(ipc.Progress)) (any, erro
 	case "rename":
 		return d.rename(req.Args.Name, req.Args.NewName)
 
+	case "reset":
+		return d.reset(req.Args.Name)
+
 	case "enable", "disable":
 		return d.toggle(req.Args.Name, req.Cmd == "enable")
 
@@ -150,6 +153,70 @@ func (d *Daemon) toggle(name string, on bool) (any, error) {
 	}
 	d.persist()
 	return s.View(), nil
+}
+
+// ResetResult reports what a reset replaced, so the caller can say where the
+// previous conversation went.
+type ResetResult struct {
+	PreviousSessionID string       `json:"previousSessionId"`
+	Status            session.View `json:"status"`
+}
+
+// reset points a session at a brand-new conversation, keeping everything else.
+//
+// `restart` resumes: that is the whole point of recording a session id, and it
+// is what makes a session survive a reboot. The cost is that a long-running
+// session accumulates context forever, and there was no way to say "same name,
+// same directory, same options, fresh conversation" without unregistering the
+// session and losing its logs along with it.
+//
+// Nothing is deleted. The previous conversation stays exactly where the
+// provider keeps it, and is reported back so it can still be resumed by hand.
+func (d *Daemon) reset(name string) (any, error) {
+	s, err := d.get(name)
+	if err != nil {
+		return nil, err
+	}
+	if !s.Provider().Capabilities().ResumeBySessionID {
+		return nil, rcerr.Newf("`rcmanager restart` is the closest thing for this provider.",
+			"%s does not work in terms of session ids, so there is no conversation for rcmanager to replace.",
+			s.Provider().DisplayName())
+	}
+
+	previous := s.Entry().SessionID
+	// Stopping first is what makes this safe: the old conversation is closed
+	// by its own agent, and the claim on it is released before another is
+	// taken on the new one.
+	wasRunning := s.Status() == session.Online || s.Status() == session.Launching
+	s.Stop("reset")
+
+	entry := s.Entry().Clone()
+	entry.SessionID = NewUUID()
+	stored, err := registry.Upsert(entry)
+	if err != nil {
+		return nil, err
+	}
+	s.SetEntry(stored)
+	s.Log("reset: new conversation " + stored.SessionID + " (previous was " + orNone(previous) + ")")
+	d.line(name + ": reset to conversation " + stored.SessionID + " (previous " + orNone(previous) + ")")
+
+	// A session that was not running stays that way: resetting it is not an
+	// instruction to start it.
+	if wasRunning {
+		if r := s.Start(false); !r.OK {
+			d.persist()
+			return nil, &rcerr.Error{Message: r.Error, Hint: r.Hint, Code: "ERROR"}
+		}
+	}
+	d.persist()
+	return ResetResult{PreviousSessionID: previous, Status: s.View()}, nil
+}
+
+func orNone(id string) string {
+	if id == "" {
+		return "none"
+	}
+	return id
 }
 
 // rename moves a session to a new name, running or not.

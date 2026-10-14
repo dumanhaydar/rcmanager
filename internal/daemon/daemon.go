@@ -174,6 +174,7 @@ func (d *Daemon) Start() error {
 	// The channel is passed in rather than read from the struct, so shutdown
 	// can retire it without racing the loop that watches it.
 	go d.persistLoop(stopPersist)
+	d.watchProfileSignal()
 	return nil
 }
 

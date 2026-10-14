@@ -13,6 +13,7 @@ package session
 import (
 	"os/exec"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/dumanhaydar/rcmanager/internal/claim"
@@ -175,10 +176,17 @@ type Managed struct {
 
 	ingestCh chan chunk
 	pending  map[string]bool
-	tailBuf  string
-	urlBuf   string
-	blocked  string
-	usesPty  bool
+	// needAnalysis is read by the capture sinks, which run on the tailers'
+	// goroutines and must not touch the session lock. Once the URL is known
+	// and every one-shot prompt has been answered, there is nothing left to
+	// look for in a session's output — and an agent TUI repaints several times
+	// a second for the rest of its life. Logs are still written; the matching
+	// is what stops.
+	needAnalysis atomic.Bool
+	tailBuf      string
+	urlBuf       string
+	blocked      string
+	usesPty      bool
 }
 
 // Options configures a managed session.
@@ -357,6 +365,10 @@ func (m *Managed) logLocked(text string) {
 	m.openLogsLocked()
 	m.out.Line("rcmanager | " + text)
 }
+
+// Log writes a line to the session's own log, for the things the daemon does
+// to a session rather than with it.
+func (m *Managed) Log(text string) { m.log(text) }
 
 func (m *Managed) log(text string) {
 	m.mu.Lock()

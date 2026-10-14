@@ -70,6 +70,11 @@ const maxPad = 200
 
 // Strip removes ANSI escapes, turning cursor-forward padding back into spaces.
 func Strip(s string) string {
+	// Plain output is the common case on the write-the-log path, and three
+	// regexes over text with nothing to strip is pure cost.
+	if !strings.Contains(s, esc) {
+		return s
+	}
 	s = oscRe.ReplaceAllString(s, "")
 	s = cufRe.ReplaceAllStringFunc(s, func(m string) string {
 		digits := cufRe.FindStringSubmatch(m)[1]

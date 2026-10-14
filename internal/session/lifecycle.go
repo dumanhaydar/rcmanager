@@ -175,6 +175,7 @@ func (m *Managed) spawnChild() Result {
 	m.urlBuf = ""
 	m.urlLocked = false
 	m.blocked = ""
+	m.needAnalysis.Store(true)
 
 	if err := m.io.Open(true); err != nil {
 		msg := "could not open session stdio: " + err.Error()
@@ -619,6 +620,7 @@ func (m *Managed) tryAdopt(saved *Persisted) bool {
 	// handover, do not let old lines overwrite it.
 	m.urlLocked = saved.RemoteURL != ""
 	m.blocked = ""
+	m.needAnalysis.Store(true)
 	m.openLogsLocked()
 	m.mu.Unlock()
 

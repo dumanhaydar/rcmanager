@@ -244,6 +244,7 @@ a blank import.
 | `rcmanager start <file.json>` | Register and start an ecosystem file |
 | `rcmanager stop` · `restart` · `remove <name>` | `remove` never deletes the conversation |
 | `rcmanager rename <name> <new-name>` | Renames the handle; the session keeps running |
+| `rcmanager reset <name>` | Fresh conversation, same name and directory; nothing is deleted |
 | `rcmanager enable` · `disable <name>` | Autostart on and start now · stop and stay stopped |
 | `rcmanager ls` · `status` · `info <name>` | `--json` everywhere |
 | `rcmanager logs [name] [-n N] [-f]` | Per-session logs, ANSI-stripped and rotated |
@@ -259,6 +260,30 @@ a blank import.
 then system), launchd, OpenRC, or a cron `@reboot` as a last resort. Every
 setting, every `providerOptions` key and the full `$RCMANAGER_HOME` layout are
 documented in **[docs/CONFIGURATION.md](docs/CONFIGURATION.md)**.
+
+## What it costs to leave sessions online
+
+Measured on ten supervised sessions, because this is the first question anyone
+asks:
+
+| | |
+| --- | --- |
+| Memory | 250–400 MB per agent session — that is the agent CLI itself, and it is the real cost |
+| CPU, sessions idle | **0.6 %** of one core for the supervisor and all ten sessions |
+| CPU, agents repainting their TUIs | **2.6 %** of one core for eight of them at once |
+| Disk | under a megabyte of state; logs rotate, raw capture truncates itself |
+| Tokens | none. Nothing queries the model until you send a message |
+
+The supervisor was three times that before it was profiled: the cost was
+regexes run over kilobytes of repaint on every write, and polling files five
+times a second for sessions that print nothing all day. Both are fixed, and
+`kill -USR1 <daemon pid>` writes a 30-second CPU profile into
+`$RCMANAGER_HOME` if you want to check the claim on your own machine.
+
+What does grow is the conversation. A session left running for weeks
+accumulates context, and every message in a large one costs more — `rcmanager
+restart` resumes it, deliberately, so `rcmanager reset` is the way to keep the
+session and start the conversation over.
 
 ## Development
 

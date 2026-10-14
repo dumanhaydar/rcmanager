@@ -87,6 +87,7 @@ func commands() map[string]handler {
 		"restart": restart,
 		"remove":  remove,
 		"rename":  rename,
+		"reset":   reset,
 		"mv":      rename,
 		"delete":  remove,
 		"rm":      remove,
@@ -145,6 +146,7 @@ func helpText() string {
   stop <name> | stop all     Stop gracefully (SIGTERM, then SIGKILL)
   restart <name> | all       Stop then start
   rename <name> <new-name>   Rename a session ` + g("(it keeps running; same conversation)") + `
+  reset <name>               Fresh conversation, same name and directory ` + g("(nothing is deleted)") + `
   remove <name>              Unregister from rcmanager ` + g("(never deletes the conversation)") + `
   enable <name>              Mark autostart on, and start it now
   disable <name>             Stop it and keep it stopped across restarts

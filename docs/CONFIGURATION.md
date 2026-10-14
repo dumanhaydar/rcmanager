@@ -142,6 +142,39 @@ rcmanager is already running — a terminal, an IDE, or an orphan left by a
 daemon that was killed. Both refusals name the process or daemon in the way,
 so the fix is always visible.
 
+## Starting a conversation over
+
+```sh
+rcmanager reset my-session
+```
+
+`restart` resumes: the recorded session id is what makes a session survive a
+reboot as the same conversation, and that is usually the point. `reset` is for
+when it stops being the point — a session whose context has grown past being
+useful, where you want the same name, the same directory and the same options
+with a conversation that starts fresh.
+
+It stops the session, mints a new session id, records it, and starts the
+session again if it was running. A session that was stopped stays stopped:
+resetting it is not an instruction to start it.
+
+Nothing is deleted. The previous conversation stays exactly where the provider
+keeps it and is reported back so you can still resume it by hand:
+
+```console
+$ rcmanager reset my-session
+✔ my-session now runs a fresh conversation 95143396
+· the previous one (256eb69e-dae1-4f41-9d93-d5ed0aa292ff) was not deleted
+```
+
+The session's logs are kept too, with a line marking where one conversation
+ended and the next began. On a provider that does not work in terms of session
+ids — Codex — there is no conversation for rcmanager to replace, and `reset`
+says so instead of restarting and calling it one.
+
+A running session is interrupted mid-thought, so rcmanager asks first when
+there is a terminal to ask in. `--yes` skips the question for scripts.
+
 ## Renaming a session
 
 ```sh
@@ -214,6 +247,38 @@ machine and refuses a second. The managed child is rcmanager itself, re-executed
 a supervisor that keeps that daemon alive with remote control enabled and stops
 it again on `rcmanager stop`. There are no provider options. Pair the machine once,
 interactively, with `codex remote-control pair`.
+
+## Performance, and how to check it
+
+Ten idle supervised sessions cost the daemon about 0.6 % of one core; eight
+agents repainting their TUIs at once cost about 2.6 %. The agent processes
+themselves are the expensive part, at 250–400 MB each.
+
+Two things keep the supervisor cheap, and both are visible in behaviour:
+
+- **Output is only matched while there is something to match.** The
+  remote-control URL is looked for until it is found (or until the
+  announcement window closes), and the startup modals rcmanager answers are
+  looked for while a startup modal is still plausible — three minutes. The
+  prompts rcmanager refuses to answer for you keep being watched for as long
+  as the session runs, because a session stalled on one should always be able
+  to say so. Logs are written either way.
+- **Reading backs off when a session goes quiet.** Raw capture is polled five
+  times a second while output is flowing and once a second after five seconds
+  of silence, snapping back on the first byte. The cost is that a prompt
+  arriving after a long silence is answered up to a second later.
+
+If you want to check any of this on your own machine rather than take it on
+faith:
+
+```sh
+kill -USR1 $(rcmanager daemon --status | sed -n 's/.*pid //p')
+# 30 seconds later
+go tool pprof -top "$RCMANAGER_HOME"/profile-*.cpu
+```
+
+Nothing is collected until asked, and the profile is written into
+`$RCMANAGER_HOME`.
 
 ## The service
 

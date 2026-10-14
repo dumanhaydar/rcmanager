@@ -20,6 +20,25 @@ type chunk struct {
 // second, and a full queue only delays analysis, never a log write.
 const ingestQueue = 1024
 
+// matchTail is how much of the previous output each new chunk is matched
+// against.
+//
+// Prompts render across several writes, so some overlap is needed — but the
+// patterns are phrases of a few dozen characters, and re-scanning kilobytes of
+// repaint on every chunk is how a supervisor watching ten TUIs spends a
+// measurable slice of a core. A few hundred characters covers any way a short
+// phrase can be split; the profile is what settled the number.
+const matchTail = 512
+
+// promptWindow is how long a startup modal is still expected.
+//
+// After it, the prompts rcmanager answers by itself are no longer plausible —
+// they are the ones an agent CLI shows while starting — so they stop being
+// looked for. The ones rcmanager refuses to answer on the user's behalf keep
+// being watched for as long as the session runs: those are a diagnosis, and a
+// session that stalls on one should say so whenever it happens.
+const promptWindow = 3 * time.Minute
+
 // startCaptureLocked follows the raw capture files. Offsets are persisted, so
 // a daemon that replaces another picks up mid-stream rather than replaying or
 // skipping.
@@ -38,9 +57,10 @@ func (m *Managed) startCaptureLocked(offsets sio.Offsets) {
 	// are built around values captured here: a sink that reached back into the
 	// session for anything would deadlock against its own caller the moment
 	// the raw file already had output in it.
+	m.refreshAnalysisNeededLocked()
 	m.tailers = []*sio.Tailer{
-		sio.NewTailer(m.io.Files.Out, sink(m.out, ch, false)).Start(offsets.Out),
-		sio.NewTailer(m.io.Files.Err, sink(m.err, ch, true)).Start(offsets.Err),
+		sio.NewTailer(m.io.Files.Out, m.sink(m.out, ch, false)).Start(offsets.Out),
+		sio.NewTailer(m.io.Files.Err, m.sink(m.err, ch, true)).Start(offsets.Err),
 	}
 }
 
@@ -53,12 +73,15 @@ func (m *Managed) startCaptureLocked(offsets sio.Offsets) {
 // A full queue drops the chunk for *analysis* only — the log keeps every byte.
 // That costs a slightly later URL or prompt match on a session producing output
 // faster than it can be read, which is a better failure than a stalled tailer.
-func sink(stream *logstream.Stream, ch chan<- chunk, stderr bool) func([]byte) {
+func (m *Managed) sink(stream *logstream.Stream, ch chan<- chunk, stderr bool) func([]byte) {
 	return func(data []byte) {
 		if stream != nil {
 			stream.Write(data)
 		}
-		if ch == nil {
+		// Nothing left to match: skip the copy and the queue entirely. This is
+		// the steady state of every healthy session, and it is where a
+		// supervisor watching ten repainting TUIs spends its day.
+		if ch == nil || !m.needAnalysis.Load() {
 			return
 		}
 		select {
@@ -153,6 +176,26 @@ func (m *Managed) analyse(text string) {
 	m.handleInteractions(text)
 }
 
+// refreshAnalysisNeededLocked works out whether anything in this session's
+// output still matters.
+//
+// An unanswered one-shot prompt does, and so does a URL that has not been seen
+// yet — including for a provider that does not advertise publishing one, since
+// the window closes on its own. A recurring prompt keeps mattering for as long
+// as the session runs.
+func (m *Managed) refreshAnalysisNeededLocked() {
+	need := !m.urlLocked
+	if !need {
+		for _, action := range m.prov.Interactions() {
+			if !action.Once || m.pending[action.ID] {
+				need = true
+				break
+			}
+		}
+	}
+	m.needAnalysis.Store(need)
+}
+
 // armURLWatchdogLocked says so when a session that should have published a URL
 // has not.
 //
@@ -204,8 +247,11 @@ func (m *Managed) captureRemoteURL(text string) {
 		return
 	}
 	if !m.urlWatchFrom.IsZero() && time.Since(m.urlWatchFrom) > urlWindow {
+		// The window has closed: a stray URL in the output is now likelier
+		// than a late announcement, and there may be nothing left to read for.
 		m.urlLocked = true
 		m.urlBuf = ""
+		m.refreshAnalysisNeededLocked()
 		return
 	}
 
@@ -227,6 +273,7 @@ func (m *Managed) captureRemoteURL(text string) {
 	if url == m.remoteURL {
 		return
 	}
+	m.refreshAnalysisNeededLocked()
 	m.updateLocked(func() { m.remoteURL = url })
 	m.logLocked("remote control URL: " + url)
 }
@@ -247,12 +294,25 @@ func (m *Managed) handleInteractions(text string) {
 		return
 	}
 
-	// Prompts render across several writes, so match against a rolling tail.
-	m.tailBuf = tailOf(m.tailBuf+stripForMatch(text), 8192)
+	// Prompts render across several writes, so match against a rolling tail —
+	// kept to pattern size rather than kilobytes.
+	m.tailBuf = tailOf(m.tailBuf+stripForMatch(text), matchTail)
 
 	// Collect first, act after. Clearing the buffer inside the loop would hide
 	// a second prompt that arrived in the same chunk from every interaction
 	// still to be tested.
+	// A startup modal that has not appeared by now is not going to, and every
+	// pattern retired here is one fewer regex run against every repaint for
+	// the rest of the session's life.
+	if len(m.pending) > 0 && !m.urlWatchFrom.IsZero() && time.Since(m.urlWatchFrom) > promptWindow {
+		for _, action := range interactions {
+			if action.Once && !action.Fatal {
+				delete(m.pending, action.ID)
+			}
+		}
+		m.refreshAnalysisNeededLocked()
+	}
+
 	var matched []int
 	for i, action := range interactions {
 		if action.Once && !m.pending[action.ID] {
@@ -271,6 +331,7 @@ func (m *Managed) handleInteractions(text string) {
 		return
 	}
 	m.tailBuf = ""
+	m.refreshAnalysisNeededLocked()
 	entry := m.entry
 	m.mu.Unlock()
 

@@ -226,9 +226,8 @@ func isFifo(file string) bool {
 // and watch events on append-heavy files are unreliable enough across
 // platforms that the fallback would have to exist anyway.
 type Tailer struct {
-	file     string
-	onData   func([]byte)
-	interval time.Duration
+	file   string
+	onData func([]byte)
 
 	mu       sync.Mutex
 	offset   int64
@@ -237,9 +236,24 @@ type Tailer struct {
 	done     chan struct{}
 }
 
+// How often a raw file is checked.
+//
+// Fast while a session is producing output — prompts have to be answered
+// promptly, and the remote-control URL is wanted as soon as it is printed —
+// and slower once it has gone quiet, because a supervisor polling sixteen
+// files five times a second for sessions that print nothing all day is the
+// cost nobody asked for. Any output at all snaps it back to Fast on the next
+// tick, so the penalty is one slow interval at the start of a burst.
+const (
+	FastInterval = 200 * time.Millisecond
+	SlowInterval = time.Second
+	// idleTicksBeforeSlowing is how long silence has to last first.
+	idleTicksBeforeSlowing = 25
+)
+
 // NewTailer prepares a tailer for file.
 func NewTailer(file string, onData func([]byte)) *Tailer {
-	return &Tailer{file: file, onData: onData, interval: 200 * time.Millisecond}
+	return &Tailer{file: file, onData: onData}
 }
 
 // Start begins reading at offset. Pass the persisted offset so a successor
@@ -259,15 +273,23 @@ func (t *Tailer) Start(offset int64) *Tailer {
 	t.Poll()
 	go func() {
 		defer close(done)
-		ticker := time.NewTicker(t.interval)
-		defer ticker.Stop()
+		interval := FastInterval
+		idle := 0
+		timer := time.NewTimer(interval)
+		defer timer.Stop()
 		for {
 			select {
 			case <-stop:
 				return
-			case <-ticker.C:
-				t.Poll()
+			case <-timer.C:
 			}
+			if t.Poll() > 0 {
+				idle = 0
+				interval = FastInterval
+			} else if idle++; idle >= idleTicksBeforeSlowing {
+				interval = SlowInterval
+			}
+			timer.Reset(interval)
 		}
 	}()
 	return t
@@ -281,14 +303,14 @@ func (t *Tailer) Position() int64 {
 	return t.offset
 }
 
-// Poll reads whatever is new, right now.
-func (t *Tailer) Poll() {
+// Poll reads whatever is new, right now, and reports how many bytes that was.
+func (t *Tailer) Poll() int {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
 	st, err := os.Stat(t.file)
 	if err != nil {
-		return
+		return 0
 	}
 	size := st.Size()
 
@@ -300,12 +322,12 @@ func (t *Tailer) Poll() {
 	}
 	if size == t.offset {
 		t.maybeTruncateLocked(size)
-		return
+		return 0
 	}
 
 	fd, err := os.Open(t.file)
 	if err != nil {
-		return
+		return 0
 	}
 	defer fd.Close()
 
@@ -325,6 +347,7 @@ func (t *Tailer) Poll() {
 	_ = err // a partial read is retried on the next tick
 
 	t.maybeTruncateLocked(t.offset)
+	return n
 }
 
 // maybeTruncateLocked keeps the raw file from growing without bound.

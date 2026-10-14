@@ -17,11 +17,17 @@ import (
 
 // fake is a provider whose "agent" is a shell loop, so the daemon can be
 // driven end to end without either provider CLI installed.
-type fake struct{ singleton bool }
+type fake struct {
+	singleton bool
+	resumable bool
+}
 
 func (f fake) ID() string {
-	if f.singleton {
+	switch {
+	case f.singleton:
 		return "fake-singleton"
+	case f.resumable:
+		return "fake-resumable"
 	}
 	return "fake"
 }
@@ -35,7 +41,11 @@ func (fake) ExtractRemoteURL(string) string            { return "" }
 func (fake) Interactions() []provider.Interaction      { return nil }
 
 func (f fake) Capabilities() provider.Capabilities {
-	return provider.Capabilities{Headless: true, Singleton: f.singleton}
+	return provider.Capabilities{
+		Headless:          true,
+		Singleton:         f.singleton,
+		ResumeBySessionID: f.resumable,
+	}
 }
 
 func (fake) BuildCommand(e *registry.Entry) (provider.Command, error) {
@@ -50,6 +60,7 @@ func (fake) BuildCommand(e *registry.Entry) (provider.Command, error) {
 func init() {
 	provider.Register(fake{})
 	provider.Register(fake{singleton: true})
+	provider.Register(fake{resumable: true})
 }
 
 func start(t *testing.T) (*Daemon, string) {
@@ -347,5 +358,87 @@ func TestRenameOverIPC(t *testing.T) {
 	// After all that, the session is still itself.
 	if s, err := d.get("after"); err != nil || s.Pid() != pid {
 		t.Errorf("the session did not survive the refused renames: %v", err)
+	}
+}
+
+// reset is the one way to say "same session, different conversation": restart
+// deliberately resumes, which is what makes a session survive a reboot.
+func TestResetGivesAFreshConversation(t *testing.T) {
+	d, socket := start(t)
+	work := t.TempDir()
+
+	entry := &registry.Entry{Name: "demo", Provider: "fake-resumable", Cwd: work, Enabled: true}
+	if err := call(t, socket, "register", ipc.Args{Entry: entry}, nil); err != nil {
+		t.Fatal(err)
+	}
+	// A resumable provider is given an id at registration.
+	before := registry.Get("demo")
+	if before.SessionID == "" {
+		t.Fatal("no session id was assigned")
+	}
+	if err := call(t, socket, "start", ipc.Args{Name: "demo"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "the session to come online", func() bool {
+		s, _ := d.get("demo")
+		return s.Status() == session.Online
+	})
+	running, _ := d.get("demo")
+	pidBefore := running.Pid()
+
+	var result ResetResult
+	if err := call(t, socket, "reset", ipc.Args{Name: "demo"}, &result); err != nil {
+		t.Fatal(err)
+	}
+
+	if result.PreviousSessionID != before.SessionID {
+		t.Errorf("PreviousSessionID = %q, want %q", result.PreviousSessionID, before.SessionID)
+	}
+	after := registry.Get("demo")
+	if after.SessionID == before.SessionID || after.SessionID == "" {
+		t.Fatalf("the session id was not replaced: %q", after.SessionID)
+	}
+	// Everything that is not the conversation stays put.
+	if after.Name != "demo" || after.Cwd != before.Cwd || after.Enabled != before.Enabled {
+		t.Errorf("reset changed more than the conversation: %+v", after)
+	}
+	// And it is running again, as a different process on the new conversation.
+	if result.Status.Status != session.Online && result.Status.Status != session.Launching {
+		t.Errorf("status after reset = %q", result.Status.Status)
+	}
+	if result.Status.Pid == pidBefore {
+		t.Error("the old process is still the one running")
+	}
+
+	// A provider with no notion of a session id has no conversation to
+	// replace, and says so rather than restarting and calling it a reset.
+	plain := &registry.Entry{Name: "plain", Provider: "fake", Cwd: work, Enabled: false}
+	if err := call(t, socket, "register", ipc.Args{Entry: plain}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := call(t, socket, "reset", ipc.Args{Name: "plain"}, nil); err == nil {
+		t.Error("reset was accepted for a provider without session ids")
+	}
+}
+
+// Resetting a session that was not running is not an instruction to start it.
+func TestResetLeavesAStoppedSessionStopped(t *testing.T) {
+	_, socket := start(t)
+
+	entry := &registry.Entry{Name: "demo", Provider: "fake-resumable", Cwd: t.TempDir(), Enabled: false}
+	if err := call(t, socket, "register", ipc.Args{Entry: entry}, nil); err != nil {
+		t.Fatal(err)
+	}
+	before := registry.Get("demo").SessionID
+
+	var result ResetResult
+	if err := call(t, socket, "reset", ipc.Args{Name: "demo"}, &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Status.Pid != 0 {
+		t.Errorf("reset started a session that was not running: pid %d", result.Status.Pid)
+	}
+	if registry.Get("demo").SessionID == before {
+		t.Error("the conversation was not replaced")
 	}
 }
