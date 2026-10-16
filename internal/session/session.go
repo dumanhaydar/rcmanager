@@ -61,6 +61,9 @@ const (
 // error, because nothing suggests looking.
 const urlWatchdog = 90 * time.Second
 
+// urlRecheck is how often a session still missing its URL is looked at again.
+const urlRecheck = 15 * time.Second
+
 // Veto is the daemon's refusal to start a session (a provider singleton).
 type Veto struct {
 	Error string

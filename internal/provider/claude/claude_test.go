@@ -1,6 +1,7 @@
 package claude
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -252,6 +253,46 @@ func TestInteractionPatternsMatchFlattenedOutput(t *testing.T) {
 	// Workspace trust is never clicked through without an explicit opt-in.
 	if got := byID["trust-dialog"](&registry.Entry{}); got != "" {
 		t.Errorf("the trust dialog was answered on the user's behalf: %q", got)
+	}
+
+	// The Chrome prompt as 2.1.301 actually paints it, and declined: Esc
+	// grants nothing.
+	chrome := "Claude in Chrome extension detected\n❯ No, keep browser tools off\n  Yes, use my browser\nEnter to confirm · Esc to keep browser tools off"
+	if !patterns["chrome-onboarding"].MatchString(flatten(chrome)) {
+		t.Error("the Chrome startup prompt would not be answered")
+	}
+	if got := byID["chrome-onboarding"](&registry.Entry{}); got != "\x1b" {
+		t.Errorf("chrome-onboarding answer = %q, want Esc", got)
+	}
+}
+
+func TestReadRemoteURLFromTheSessionRecord(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", dir)
+	if err := os.MkdirAll(filepath.Join(dir, "sessions"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	write := func(name string, pid int, sessionID, bridge string, startedAt int64) {
+		body := fmt.Sprintf(`{"pid":%d,"sessionId":%q,"startedAt":%d,"bridgeSessionId":%q}`, pid, sessionID, startedAt, bridge)
+		if err := os.WriteFile(filepath.Join(dir, "sessions", name), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	const id = "f6f781de-c2f3-4a60-b545-b7aad334d907"
+	live := os.Getpid()
+
+	write("1.json", live, "another-conversation", "session_AAAAAAAAAAAAAAAAAAAAAAAA", 3)
+	// A record whose process is gone, newer than the live one: a restart
+	// leaves these behind, and its bridge is dead.
+	write("2.json", 1<<22+12345, id, "session_BBBBBBBBBBBBBBBBBBBBBBBB", 2)
+	write("3.json", live, id, "session_01WiFfFrekZv6kR7rh8dZdgk", 1)
+
+	got := (Provider{}).ReadRemoteURL(&registry.Entry{SessionID: id})
+	if got != "https://claude.ai/code/session_01WiFfFrekZv6kR7rh8dZdgk" {
+		t.Errorf("ReadRemoteURL = %q", got)
+	}
+	if got := (Provider{}).ReadRemoteURL(&registry.Entry{SessionID: "nobody"}); got != "" {
+		t.Errorf("an unknown conversation got %q", got)
 	}
 }
 

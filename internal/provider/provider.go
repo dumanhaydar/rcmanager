@@ -207,6 +207,17 @@ type OwnerFinder interface {
 	FindExternalOwner(e *registry.Entry, excludePids []int) *Owner
 }
 
+// URLReader is implemented by providers that record the remote-control URL of
+// a running session somewhere more reliable than its screen.
+//
+// Output is still read first, because it is immediate. This is what settles
+// it when the screen is not enough: a repaint that damaged every copy of the
+// id, or an announcement that only arrived after a prompt was answered by
+// hand, long after the window for trusting output had closed.
+type URLReader interface {
+	ReadRemoteURL(e *registry.Entry) string
+}
+
 var (
 	mu        sync.RWMutex
 	providers = map[string]Provider{}

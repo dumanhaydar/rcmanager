@@ -7,6 +7,7 @@ import (
 
 	"github.com/dumanhaydar/rcmanager/internal/ansi"
 	"github.com/dumanhaydar/rcmanager/internal/logstream"
+	"github.com/dumanhaydar/rcmanager/internal/provider"
 	"github.com/dumanhaydar/rcmanager/internal/sio"
 )
 
@@ -202,6 +203,12 @@ func (m *Managed) refreshAnalysisNeededLocked() {
 // Deliberately a message rather than an error status: the process is running
 // and may yet recover, and rcmanager marking it failed would trigger a restart
 // that solves nothing. What was missing was any signal at all.
+//
+// It keeps checking rather than firing once. A session can come good long
+// after the deadline — a prompt answered by hand, an announcement whose every
+// copy the repaint damaged — and a provider that records the URL itself
+// (provider.URLReader) is asked on every check, so the URL is found and the
+// complaint withdrawn instead of standing for the rest of the session's life.
 func (m *Managed) armURLWatchdogLocked() {
 	if m.urlTimer != nil {
 		m.urlTimer.Stop()
@@ -210,18 +217,63 @@ func (m *Managed) armURLWatchdogLocked() {
 	if !m.prov.Capabilities().PublishesRemoteURL {
 		return
 	}
-	name := m.entry.Name
-	m.urlTimer = time.AfterFunc(urlWatchdog, func() {
-		m.mu.Lock()
-		defer m.mu.Unlock()
-		if m.remoteURL != "" || m.status != Online {
-			return
-		}
-		msg := "no remote-control URL after " + itoa(int(urlWatchdog.Seconds())) + "s — " +
-			"the session may be stuck on a prompt; check: rcmanager logs " + name
+	m.urlTimer = time.AfterFunc(urlRecheck, m.checkRemoteURL)
+}
+
+func (m *Managed) checkRemoteURL() {
+	m.mu.Lock()
+	if m.remoteURL != "" || (m.status != Online && m.status != Launching) {
+		m.mu.Unlock()
+		return
+	}
+	entry := m.entry
+	m.mu.Unlock()
+
+	// File I/O, so outside the lock.
+	url := ""
+	if r, ok := m.prov.(provider.URLReader); ok {
+		url = r.ReadRemoteURL(entry)
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.remoteURL != "" || (m.status != Online && m.status != Launching) {
+		return
+	}
+	if url != "" {
+		m.urlTimer = nil
+		m.urlLocked = true
+		m.urlBuf = ""
+		m.refreshAnalysisNeededLocked()
+		m.setRemoteURLLocked(url, "remote control URL (from the provider's session record): ")
+		return
+	}
+
+	// Only into an empty slot: a blocked prompt's own description says more.
+	if m.status == Online && time.Since(m.urlWatchFrom) >= urlWatchdog && m.message == "" {
+		msg := urlWatchdogMessage(m.entry.Name)
 		m.updateLocked(func() { m.message = msg })
 		m.logLocked(msg)
+	}
+	m.urlTimer = time.AfterFunc(urlRecheck, m.checkRemoteURL)
+}
+
+func urlWatchdogMessage(name string) string {
+	return "no remote-control URL after " + itoa(int(urlWatchdog.Seconds())) + "s — " +
+		"the session may be stuck on a prompt; check: rcmanager logs " + name
+}
+
+// setRemoteURLLocked records the URL, and withdraws the watchdog's complaint
+// if that is what the session is still showing.
+func (m *Managed) setRemoteURLLocked(url, logPrefix string) {
+	stale := m.message == urlWatchdogMessage(m.entry.Name)
+	m.updateLocked(func() {
+		m.remoteURL = url
+		if stale {
+			m.message = ""
+		}
 	})
+	m.logLocked(logPrefix + url)
 }
 
 var whitespaceRe = regexp.MustCompile(`\s+`)
@@ -274,8 +326,7 @@ func (m *Managed) captureRemoteURL(text string) {
 		return
 	}
 	m.refreshAnalysisNeededLocked()
-	m.updateLocked(func() { m.remoteURL = url })
-	m.logLocked("remote control URL: " + url)
+	m.setRemoteURLLocked(url, "remote control URL: ")
 }
 
 // handleInteractions answers the blocking prompts an agent CLI shows on

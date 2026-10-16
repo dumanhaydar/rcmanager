@@ -566,6 +566,24 @@ var interactions = []provider.Interaction{
 		Delay:    1200 * time.Millisecond,
 	},
 	{
+		// Since 2.1.30x, a session that finds the Claude-in-Chrome extension
+		// asks at startup whether to drive the browser, preselecting "No".
+		// Unanswered it stalls before remote control comes up, so the session
+		// never appears in the app.
+		//
+		// Declining is the one answer rcmanager gives on its own: it grants
+		// nothing, and it is the CLI's own default. Turning browser tools on
+		// is the user's call, made with `/chrome` in the session.
+		ID:    "chrome-onboarding",
+		Once:  true,
+		Match: regexp.MustCompile(`(?i)claudeinchromeextensiondetected|esctokeepbrowsertoolsoff`),
+		// Esc is the prompt's own "keep browser tools off".
+		Respond:  func(*registry.Entry) string { return "\x1b" },
+		Answered: "answered the Claude-in-Chrome startup prompt",
+		Describe: "waiting at the Claude-in-Chrome startup prompt",
+		Delay:    1200 * time.Millisecond,
+	},
+	{
 		ID:       "browser-prompt",
 		Once:     true,
 		Match:    regexp.MustCompile(`(?i)claudewantstouseyourbrowser`),
@@ -775,6 +793,62 @@ func (Provider) FindExternalOwner(e *registry.Entry, excludePids []int) *provide
 	return nil
 }
 
+func sessionsDir() string {
+	if dir := os.Getenv("CLAUDE_CONFIG_DIR"); dir != "" {
+		return filepath.Join(dir, "sessions")
+	}
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".claude", "sessions")
+}
+
+var bridgeIDRe = regexp.MustCompile(`^session_[A-Za-z0-9]{24}$`)
+
+// ReadRemoteURL reads the URL from the record Claude keeps for every running
+// process, ~/.claude/sessions/<pid>.json:
+//
+//	{"pid":92653,"sessionId":"<uuid>","startedAt":…,"bridgeSessionId":"session_…",…}
+//
+// The pid is Claude's own, a child of rcmanager's pty wrapper rather than the
+// pid rcmanager supervises, so the record is found by conversation instead.
+// Records outlive their process, so only a live pid counts, and the newest
+// one wins if a restart left a stale one behind.
+func (Provider) ReadRemoteURL(e *registry.Entry) string {
+	if e.SessionID == "" {
+		return ""
+	}
+	dir := sessionsDir()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return ""
+	}
+	best, bestAt := "", int64(-1)
+	for _, f := range entries {
+		if !strings.HasSuffix(f.Name(), ".json") {
+			continue
+		}
+		var rec struct {
+			Pid             int    `json:"pid"`
+			SessionID       string `json:"sessionId"`
+			StartedAt       int64  `json:"startedAt"`
+			BridgeSessionID string `json:"bridgeSessionId"`
+		}
+		if err := jsonfile.ReadStrict(filepath.Join(dir, f.Name()), &rec); err != nil {
+			continue
+		}
+		if rec.SessionID != e.SessionID || !bridgeIDRe.MatchString(rec.BridgeSessionID) {
+			continue
+		}
+		if rec.StartedAt <= bestAt || !procs.IsAlive(rec.Pid) {
+			continue
+		}
+		best, bestAt = rec.BridgeSessionID, rec.StartedAt
+	}
+	if best == "" {
+		return ""
+	}
+	return sessionURL(best)
+}
+
 // Real ids are `session_` + exactly 24 characters.
 //
 // The payload is matched strictly: a repaint can drop a character out of the
@@ -892,4 +966,5 @@ var (
 	_ provider.Installable = Provider{}
 	_ provider.TrustKeeper = Provider{}
 	_ provider.OwnerFinder = Provider{}
+	_ provider.URLReader   = Provider{}
 )
