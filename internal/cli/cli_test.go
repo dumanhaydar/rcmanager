@@ -1,8 +1,13 @@
 package cli
 
 import (
+	"os"
 	"reflect"
 	"testing"
+
+	"github.com/dumanhaydar/rcmanager/internal/paths"
+	_ "github.com/dumanhaydar/rcmanager/internal/provider/claude"
+	"github.com/dumanhaydar/rcmanager/internal/registry"
 )
 
 func TestParse(t *testing.T) {
@@ -63,5 +68,45 @@ func TestUnknownCommandExitsNonZero(t *testing.T) {
 	// No command at all is a usage error, which is what a shell script checks.
 	if code := Main(nil); code != 1 {
 		t.Errorf("Main(nil) = %d, want 1", code)
+	}
+}
+
+func TestStartWithAPathKeepsTheRegisteredSessionID(t *testing.T) {
+	t.Setenv("RCMANAGER_HOME", t.TempDir())
+	paths.Reload()
+	t.Cleanup(func() {
+		os.Unsetenv("RCMANAGER_HOME")
+		paths.Reload()
+	})
+	dir := t.TempDir()
+
+	first, err := resolveTarget("demo", dir, "claude", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := registry.Upsert(first.entry); err != nil {
+		t.Fatal(err)
+	}
+
+	// The same `start <name> <path>` again is the same session: a new id
+	// here would point the registry at a conversation that does not exist.
+	again, err := resolveTarget("demo", dir, "claude", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again.entry.SessionID != first.entry.SessionID {
+		t.Errorf("session id changed from %s to %s", first.entry.SessionID, again.entry.SessionID)
+	}
+	if again.origin != "registry" {
+		t.Errorf("origin = %q, want registry", again.origin)
+	}
+
+	// A different directory is a different session.
+	moved, err := resolveTarget("demo", t.TempDir(), "claude", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if moved.entry.SessionID == first.entry.SessionID {
+		t.Error("a new directory kept the old session id")
 	}
 }

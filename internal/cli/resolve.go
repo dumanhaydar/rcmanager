@@ -66,9 +66,19 @@ func resolveTarget(name, dir, providerID string, quiet bool) (*target, error) {
 			return nil, rcerr.Newf(hint, "Provider %q cannot create new sessions.", p.ID())
 		}
 
-		if existing := registry.Get(name); existing != nil && existing.Cwd != cwd && !quiet {
+		existing := registry.Get(name)
+		if existing != nil && existing.Cwd != cwd && !quiet {
 			fmt.Fprintln(os.Stderr, ansi.Yellow(fmt.Sprintf(
 				"! %q was registered at %s; re-registering at %s.", name, existing.Cwd, cwd)))
+		}
+
+		// Running the same `start <name> <path>` twice is the same session, not
+		// a request for a new one. Minting a fresh id here used to rewrite the
+		// registry under a session that was already running — it kept its
+		// conversation, the registry pointed at one that did not exist, and the
+		// next restart quietly began an empty conversation instead of resuming.
+		if existing != nil && existing.Cwd == cwd && existing.Provider == p.ID() {
+			return &target{entry: existing, origin: "registry"}, nil
 		}
 
 		// Fix the session id now rather than letting the provider invent one
