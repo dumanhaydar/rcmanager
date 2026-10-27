@@ -318,3 +318,5 @@ A Go port of [**ybouane/rcman**](https://github.com/ybouane/rcman), whose design
 — the registry, the adoption protocol, the provider contract, the honesty about
 what each agent CLI cannot do — is the reason this was worth porting rather than
 inventing. MIT, like the original.
+
+Built and maintained by [Duman Haydar](https://duman.io).
