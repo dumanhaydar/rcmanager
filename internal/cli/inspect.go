@@ -65,10 +65,26 @@ func list(_ []string, flags Flags) error {
 	fmt.Println(format.Table(
 		[]string{"Name", "Provider", "Status", "PID", "Session ID", "Directory", "Uptime"}, rows))
 
+	// One line per provider for sessions waiting on a sign-in: they all share
+	// one cause, and a dozen copies of it would bury everything else.
+	authWait := map[string][]string{}
+	var authOrder []string
 	for _, s := range sessions {
+		if s.Status == session.AuthRequired && s.Enabled {
+			if _, seen := authWait[s.Provider]; !seen {
+				authOrder = append(authOrder, s.Provider)
+			}
+			authWait[s.Provider] = append(authWait[s.Provider], s.Name)
+			continue
+		}
 		if s.Message != "" {
 			fmt.Println(ansi.Grey("  " + s.Name + ": " + s.Message))
 		}
+	}
+	for _, id := range authOrder {
+		fmt.Println(ansi.Yellow(fmt.Sprintf("  %s is not signed in where the rcmanager daemon runs it — %d session(s) waiting: %s",
+			id, len(authWait[id]), strings.Join(authWait[id], ", "))))
+		fmt.Println(ansi.Yellow("  diagnose with:  rcmanager doctor"))
 	}
 
 	d := client.DaemonInfo()
@@ -157,6 +173,9 @@ func info(args []string, flags Flags) error {
 	remote := s.RemoteURL
 	if remote == "" {
 		remote = "(not seen yet — check the log)"
+		if s.Status == session.AuthRequired {
+			remote = "(none — not signed in; run `rcmanager doctor`)"
+		}
 	}
 	registered := "via CLI"
 	if s.Source != "" {
@@ -177,6 +196,9 @@ func info(args []string, flags Flags) error {
 		{"log (out)", s.Logs.Out},
 		{"log (err)", s.Logs.Err},
 		{"registered", registered},
+	}
+	if s.Message != "" {
+		rows = append(rows, [2]string{"message", s.Message})
 	}
 	if s.Note != "" {
 		rows = append(rows, [2]string{"note", s.Note})

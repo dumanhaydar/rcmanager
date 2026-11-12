@@ -249,6 +249,7 @@ a blank import.
 | `rcmanager ls` · `status` · `info <name>` | `--json` everywhere |
 | `rcmanager logs [name] [-n N] [-f]` | Per-session logs, ANSI-stripped and rotated |
 | `rcmanager discover [name]` | Sessions the provider knows about locally |
+| `rcmanager doctor` | Is each provider signed in — from your shell *and* from the daemon? |
 | `rcmanager config list\|get\|set\|unset` | Supervision policy |
 | `rcmanager reload` | Re-read config and registry without interrupting work |
 | `rcmanager trust` · `untrust <path>` | Workspace trust, explicitly |
@@ -260,6 +261,56 @@ a blank import.
 then system), launchd, OpenRC, or a cron `@reboot` as a last resort. Every
 setting, every `providerOptions` key and the full `$RCMANAGER_HOME` layout are
 documented in **[docs/CONFIGURATION.md](docs/CONFIGURATION.md)**.
+
+## Troubleshooting
+
+### A session shows `auth-required`
+
+The provider CLI is not signed in **where the daemon runs it**. That can be
+true while `claude auth status` says you are signed in from your terminal: the
+daemon runs under launchd or systemd, with its own environment, and that is
+exactly where a login goes missing.
+
+rcmanager checks before every start and refuses to launch a session that could
+not authenticate, rather than leaving it up, unreachable and reported online. A
+session that gets as far as Claude's "Not logged in · Run /login" status line is
+stopped and marked the same way. Either way it says so once in `daemon.log`,
+and `rcmanager ls` puts the cause on a single line.
+
+```console
+$ rcmanager doctor
+```
+
+asks `claude auth status` twice — from your shell and from the daemon — and
+explains a difference. It shows whether each context is signed in, the method
+and the login expiry, and which CLI binary each one runs; never the account,
+never a token.
+
+**macOS: the Keychain and `~/.claude/.credentials.json` disagree.** Under
+launchd, Claude Code reads the Keychain entry `Claude Code-credentials` first.
+A stale entry there (empty access token, refresh token expired) wins over a
+valid credentials file, and `claude auth login` may refresh the file without
+touching the Keychain. `doctor` prints the commands; rcmanager never runs them,
+because the Keychain and your credentials are yours to change:
+
+```sh
+security find-generic-password -s "Claude Code-credentials"    # attributes and dates, not the secret
+security delete-generic-password -s "Claude Code-credentials"  # only if the credentials file is current
+rcmanager doctor                                               # signed in from the daemon now?
+rcmanager restart all
+```
+
+If the credentials file is missing or stale too, sign in again with
+`claude auth login` instead.
+
+**Linux:** the service runs as a different user, or with a different `HOME` or
+`CLAUDE_CONFIG_DIR`, than the shell you signed in from. `doctor` lists which.
+
+### A session is online but `no remote-control URL after 90s`
+
+The process is alive but has not published a URL. Look at what it is showing:
+`rcmanager logs <name>`. A startup prompt rcmanager does not answer on its own
+(workspace trust, for one) waits for you; anything else is worth an issue.
 
 ## What it costs to leave sessions online
 

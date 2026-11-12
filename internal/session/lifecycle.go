@@ -66,8 +66,12 @@ func (m *Managed) Start(force bool) Result {
 		if veto := m.canStart(m); veto != nil {
 			m.mu.Lock()
 			m.releaseClaimLocked()
+			status := veto.Status
+			if status == "" {
+				status = Stopped
+			}
 			m.updateLocked(func() {
-				m.status = Stopped
+				m.status = status
 				m.message = veto.Error
 			})
 			m.logLocked(veto.Error)
@@ -175,6 +179,7 @@ func (m *Managed) spawnChild() Result {
 	m.urlBuf = ""
 	m.urlLocked = false
 	m.blocked = ""
+	m.blockedStatus = ""
 	m.needAnalysis.Store(true)
 
 	if err := m.io.Open(true); err != nil {
@@ -310,7 +315,7 @@ func (m *Managed) handleExit(code int, signal string) {
 	tailers := m.tailers
 	stopping := m.stopping
 	enabled := m.entry.Enabled
-	blocked := m.blocked
+	blocked, blockedStatus := m.blocked, m.blockedStatus
 	autorestart := m.settingBool("autorestart")
 	window := m.settingDuration("restartWindowMs")
 	minUptime := m.settingDuration("minUptimeMs")
@@ -340,24 +345,30 @@ func (m *Managed) handleExit(code int, signal string) {
 		m.updateLocked(func() { m.status = Disabled })
 		return
 	}
+
+	// A blocking condition rcmanager is not allowed to resolve on its own (a trust
+	// or permission prompt) will not fix itself, so restarting just burns the
+	// budget and floods the log. Fail fast with the reason instead — and report
+	// it even with autorestart off, since the reason is the useful part.
+	if blocked != "" {
+		if blockedStatus == "" {
+			blockedStatus = Errored
+		}
+		m.releaseClaimLocked()
+		m.updateLocked(func() {
+			m.status = blockedStatus
+			m.message = blocked
+		})
+		m.logLocked("not restarting: " + blocked)
+		return
+	}
+
 	if !autorestart {
 		m.releaseClaimLocked()
 		m.updateLocked(func() {
 			m.status = Stopped
 			m.message = "exited (autorestart disabled)"
 		})
-		return
-	}
-
-	// A blocking condition rcmanager is not allowed to resolve on its own (a trust
-	// or permission prompt) will not fix itself, so restarting just burns the
-	// budget and floods the log. Fail fast with the reason instead.
-	if blocked != "" {
-		m.updateLocked(func() {
-			m.status = Errored
-			m.message = blocked
-		})
-		m.logLocked("not restarting: " + blocked)
 		return
 	}
 
@@ -620,6 +631,7 @@ func (m *Managed) tryAdopt(saved *Persisted) bool {
 	// handover, do not let old lines overwrite it.
 	m.urlLocked = saved.RemoteURL != ""
 	m.blocked = ""
+	m.blockedStatus = ""
 	m.needAnalysis.Store(true)
 	m.openLogsLocked()
 	m.mu.Unlock()

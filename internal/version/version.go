@@ -11,4 +11,4 @@ package version
 //	go build -ldflags "-X github.com/dumanhaydar/rcmanager/internal/version.Version=1.2.3"
 //
 // The value here is what a plain `go build` or `go install` reports.
-var Version = "1.0.0"
+var Version = "1.5.0"

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/dumanhaydar/rcmanager/internal/provider"
 	"github.com/dumanhaydar/rcmanager/internal/registry"
 )
 
@@ -354,5 +355,75 @@ func TestInteractionsAreBuiltOnce(t *testing.T) {
 		if action.Match == nil {
 			t.Errorf("interaction %q has no pattern", action.ID)
 		}
+	}
+}
+
+// Verbatim from a session's log on 2026-11-12, when the daemon under launchd
+// could not read a valid login: the status line, painted twice, once with its
+// spaces and once without. Nothing else in that output said what was wrong.
+const notLoggedInOutput = "\n" +
+	"                                                                                            Notlogged in · Run /login\n" +
+	"                                                 Notloggedin·Run/login·✘Auto-updatefailed · Run claudedoctor\n"
+
+func TestNotLoggedInIsRecognisedInRealOutput(t *testing.T) {
+	var action provider.Interaction
+	for _, i := range (Provider{}).Interactions() {
+		if i.ID == "not-logged-in" {
+			action = i
+		}
+	}
+	if action.Match == nil {
+		t.Fatal("no not-logged-in interaction")
+	}
+	flat := strings.ToLower(regexp.MustCompile(`\s+`).ReplaceAllString(notLoggedInOutput, ""))
+	if !action.Match.MatchString(flat) {
+		t.Errorf("the real not-logged-in output was not recognised: %q", flat)
+	}
+	if action.Status != "auth-required" {
+		t.Errorf("status = %q, want auth-required", action.Status)
+	}
+	// It is reported, never answered: there is nothing to type that fixes it.
+	if action.Respond != nil {
+		t.Error("the not-logged-in state has a response")
+	}
+	if !strings.Contains(action.Describe, "rcmanager doctor") {
+		t.Errorf("description does not point at the diagnosis: %q", action.Describe)
+	}
+
+	// Words that merely mention logging in are not the status line.
+	for _, unrelated := range []string{"You are logged in as you", "run /login to switch accounts", "not logged in yet? see the docs"} {
+		if action.Match.MatchString(strings.ToLower(strings.ReplaceAll(unrelated, " ", ""))) {
+			t.Errorf("matched unrelated text %q", unrelated)
+		}
+	}
+}
+
+func TestParseAuthStatus(t *testing.T) {
+	out := `{"loggedIn":false,"authMethod":"claude.ai","apiProvider":"firstParty","email":"someone@example.com","orgName":"Example Org","loginExpiresAt":"2026-11-01T00:00:00Z"}`
+	a := parseAuthStatus(provider.ProbeResult{Out: out, Code: 1})
+	if a.LoggedIn == nil || *a.LoggedIn {
+		t.Fatalf("LoggedIn = %v, want false", a.LoggedIn)
+	}
+	if a.Method != "claude.ai" || a.ExpiresAt != "2026-11-01T00:00:00Z" {
+		t.Errorf("method/expiry = %q %q", a.Method, a.ExpiresAt)
+	}
+	// What can be logged must not name the account.
+	sum := a.Summary()
+	for _, secret := range []string{"someone@example.com", "Example Org"} {
+		if strings.Contains(sum, secret) {
+			t.Errorf("Summary() leaks %q: %s", secret, sum)
+		}
+	}
+	if sum != "loggedIn=false authMethod=claude.ai expiresAt=2026-11-01T00:00:00Z" {
+		t.Errorf("Summary() = %q", sum)
+	}
+
+	// A status command that did not run says nothing about the login.
+	if a := parseAuthStatus(provider.ProbeResult{Err: "timed out", Code: -1}); a.LoggedIn != nil {
+		t.Errorf("a failed probe reported LoggedIn = %v, want unknown", *a.LoggedIn)
+	}
+	// Older builds printed prose; "not logged in" is not "logged in".
+	if a := parseAuthStatus(provider.ProbeResult{Out: "Not logged in"}); a.LoggedIn == nil || *a.LoggedIn {
+		t.Errorf("prose \"Not logged in\" read as %v", a.LoggedIn)
 	}
 }

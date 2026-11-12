@@ -7,6 +7,7 @@ import (
 
 	"github.com/dumanhaydar/rcmanager/internal/ansi"
 	"github.com/dumanhaydar/rcmanager/internal/logstream"
+	"github.com/dumanhaydar/rcmanager/internal/procs"
 	"github.com/dumanhaydar/rcmanager/internal/provider"
 	"github.com/dumanhaydar/rcmanager/internal/sio"
 )
@@ -364,9 +365,14 @@ func (m *Managed) handleInteractions(text string) {
 		m.refreshAnalysisNeededLocked()
 	}
 
+	startup := m.remoteURL == "" && !m.urlWatchFrom.IsZero() && time.Since(m.urlWatchFrom) <= promptWindow
+
 	var matched []int
 	for i, action := range interactions {
 		if action.Once && !m.pending[action.ID] {
+			continue
+		}
+		if action.Status != "" && !startup {
 			continue
 		}
 		if !action.Match.MatchString(m.tailBuf) {
@@ -388,6 +394,11 @@ func (m *Managed) handleInteractions(text string) {
 
 	for _, i := range matched {
 		action := interactions[i]
+		if action.Status != "" {
+			m.halt(action)
+			continue
+		}
+
 		keys := ""
 		if action.Respond != nil {
 			keys = action.Respond(entry)
@@ -422,6 +433,27 @@ func (m *Managed) handleInteractions(text string) {
 			}
 			m.log(label + " (sent " + quote(keys) + ")")
 		})
+	}
+}
+
+// halt stops a session whose output says it cannot work at all, and leaves
+// it in the status the provider named. The exit that follows is reported, not
+// restarted: see the blocked branch of handleExit.
+func (m *Managed) halt(action provider.Interaction) {
+	m.mu.Lock()
+	m.blocked = action.Describe
+	m.blockedStatus = Status(action.Status)
+	pid, signature := m.pid, m.signature
+	timeout := m.settingDuration("stopTimeoutMs")
+	m.updateLocked(func() {
+		m.status = Status(action.Status)
+		m.message = action.Describe
+	})
+	m.logLocked("blocked: " + action.Describe + " — stopping it rather than leaving it unreachable")
+	m.mu.Unlock()
+
+	if pid > 0 {
+		go procs.Terminate(pid, signature, timeout, true)
 	}
 }
 

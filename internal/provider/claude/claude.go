@@ -99,7 +99,7 @@ func (Provider) Limitations() []string {
 		"Binding remote control to one exact local session therefore uses `claude --resume <uuid> --remote-control`, which is the interactive UI and refuses to run on a pipe. rcmanager allocates a pty with script(1) instead of using tmux.",
 		"Resuming a large or old session shows a blocking \"resume from summary / full\" modal. rcmanager answers it automatically (summary by default; set providerOptions.resumeMode = \"full\" to change that).",
 		"The workspace must be trusted before a session can run there. `claude remote-control` hard-errors on an untrusted directory rather than prompting, and the resume path shows a modal that stalls forever, so rcmanager checks ~/.claude.json up front and refuses to start with a fix. Grant it with `rcmanager trust <path>`; it is never granted implicitly by starting a session.",
-		"Requires a logged-in Claude account with a subscription (`claude auth`).",
+		"Requires a logged-in Claude account with a subscription (`claude auth`) — signed in where the daemon runs, which under launchd or systemd is not necessarily where your shell is. rcmanager checks before each start and marks the session auth-required instead of launching it; `rcmanager doctor` compares the two.",
 		"Reattaching mints a fresh bridge, so the claude.ai/code URL changes on every restart; read the current one from `rcmanager info <name>`.",
 		"Discovery matches the display name recorded by `-n` / `--remote-control <name>` (exact, then case-insensitive, then ignoring separators). A session that was never named cannot be found by name.",
 	}
@@ -166,18 +166,22 @@ func (Provider) InstallOptions() []provider.InstallOption {
 // before rather than after.
 func (Provider) AuthStatus() provider.Auth {
 	r := provider.Probe(bin(), []string{"auth", "status"}, 20*time.Second)
-	no := false
-	if !r.OK && r.Out == "" {
-		return provider.Auth{LoggedIn: &no, Detail: firstNonEmpty(r.Err, "could not run `claude auth status`")}
-	}
+	return parseAuthStatus(r)
+}
 
+// parseAuthStatus reads only the fields that are safe to keep: whether, how,
+// and until when. The account's email and organisation are in the same
+// document and are read into Detail for the user's own terminal, never into
+// anything that is logged.
+func parseAuthStatus(r provider.ProbeResult) provider.Auth {
 	var doc struct {
-		LoggedIn   bool   `json:"loggedIn"`
-		Email      string `json:"email"`
-		AuthMethod string `json:"authMethod"`
+		LoggedIn       *bool  `json:"loggedIn"`
+		Email          string `json:"email"`
+		AuthMethod     string `json:"authMethod"`
+		LoginExpiresAt string `json:"loginExpiresAt"`
 	}
-	if err := json.Unmarshal([]byte(r.Out), &doc); err == nil {
-		in := doc.LoggedIn
+	if err := json.Unmarshal([]byte(r.Out), &doc); err == nil && doc.LoggedIn != nil {
+		in := *doc.LoggedIn
 		detail := "not signed in"
 		if in {
 			parts := []string{}
@@ -188,11 +192,19 @@ func (Provider) AuthStatus() provider.Auth {
 			}
 			detail = strings.Join(parts, " · ")
 		}
-		return provider.Auth{LoggedIn: &in, Detail: detail}
+		return provider.Auth{LoggedIn: &in, Detail: detail, Method: doc.AuthMethod, ExpiresAt: doc.LoginExpiresAt}
+	}
+
+	// The command did not run, or timed out: that says nothing about the
+	// login, and treating it as "signed out" would refuse to start sessions
+	// that would have worked.
+	if r.Out == "" {
+		return provider.Auth{Detail: firstNonEmpty(r.Err, "could not run `claude auth status`")}
 	}
 
 	// Older builds printed prose. Fall back to the shape of it.
-	in := regexp.MustCompile(`(?i)logged\s*in|signed\s*in`).MatchString(r.Out)
+	in := regexp.MustCompile(`(?i)logged\s*in|signed\s*in`).MatchString(r.Out) &&
+		!regexp.MustCompile(`(?i)not\s*(logged|signed)\s*in`).MatchString(r.Out)
 	return provider.Auth{LoggedIn: &in, Detail: strings.SplitN(r.Out, "\n", 2)[0]}
 }
 
@@ -582,6 +594,22 @@ var interactions = []provider.Interaction{
 		Answered: "answered the Claude-in-Chrome startup prompt",
 		Describe: "waiting at the Claude-in-Chrome startup prompt",
 		Delay:    1200 * time.Millisecond,
+	},
+	{
+		// A CLI that cannot find valid credentials still starts: it draws the
+		// UI, prints "Not logged in · Run /login" in the status line, and
+		// never brings remote control up. The process is alive, so this used
+		// to read as online, then as "stuck on a prompt" — when the session
+		// had in fact nothing to show and no prompt to answer.
+		//
+		// Observed under launchd on macOS with a stale Keychain entry while
+		// ~/.claude/.credentials.json was valid: `claude auth status` said
+		// signed in from a terminal and signed out from the daemon.
+		ID:       "not-logged-in",
+		Once:     true,
+		Match:    regexp.MustCompile(`(?i)notloggedin.{0,4}run/login`),
+		Status:   "auth-required",
+		Describe: "Claude Code is not signed in where rcmanager runs it (\"Not logged in · Run /login\") — run `rcmanager doctor`",
 	},
 	{
 		ID:       "browser-prompt",

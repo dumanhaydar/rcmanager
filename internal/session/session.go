@@ -40,6 +40,11 @@ const (
 	Restarting Status = "restarting"
 	Errored    Status = "errored"
 	Disabled   Status = "disabled"
+	// AuthRequired means the provider CLI is not signed in where the daemon
+	// runs it. No process is left running in this state: a session that cannot
+	// authenticate is not reachable, and restarting it changes nothing until
+	// the credentials are fixed — see `rcmanager doctor`.
+	AuthRequired Status = "auth-required"
 )
 
 // urlWindow is how long after a launch a URL in the output is still plausibly
@@ -64,10 +69,13 @@ const urlWatchdog = 90 * time.Second
 // urlRecheck is how often a session still missing its URL is looked at again.
 const urlRecheck = 15 * time.Second
 
-// Veto is the daemon's refusal to start a session (a provider singleton).
+// Veto is the daemon's refusal to start a session (a provider singleton, a
+// provider that is not signed in).
 type Veto struct {
 	Error string
 	Hint  string
+	// Status is what the session is left in; Stopped when empty.
+	Status Status
 }
 
 // Exit records how a child went away.
@@ -196,7 +204,10 @@ type Managed struct {
 	tailBuf      string
 	urlBuf       string
 	blocked      string
-	usesPty      bool
+	// blockedStatus is the status a blocked session ends in once its process
+	// is gone; Errored when empty.
+	blockedStatus Status
+	usesPty       bool
 }
 
 // Options configures a managed session.

@@ -97,6 +97,8 @@ type Daemon struct {
 	// for this, not just for the socket.
 	ready bool
 
+	auth *authGate
+
 	saveTimer   *time.Timer
 	stopPersist chan struct{}
 	stopped     chan struct{}
@@ -112,6 +114,7 @@ func New() *Daemon {
 			MaxBytes: 5 * 1024 * 1024, Retain: 3, Strip: true,
 		}),
 		stopped: make(chan struct{}),
+		auth:    newAuthGate(),
 	}
 }
 
@@ -201,6 +204,17 @@ func (d *Daemon) restoreEnabled() {
 		}
 	}
 	d.line(fmt.Sprintf("restoring %d enabled session(s)", len(enabled)))
+
+	// Say up front whether each provider in use is signed in from here. The
+	// daemon often runs in a different context from the shell it was set up
+	// in (launchd, systemd), and that is exactly where a login goes missing.
+	checked := map[string]bool{}
+	for _, s := range enabled {
+		if p := s.Provider(); !checked[p.ID()] {
+			checked[p.ID()] = true
+			d.checkAuth(p)
+		}
+	}
 
 	adopted := 0
 	for _, s := range enabled {
@@ -309,7 +323,7 @@ func (d *Daemon) attach(entry *registry.Entry) (*session.Managed, error) {
 	s := session.New(entry, p, session.Options{
 		Config:   cfg,
 		OnChange: d.schedulePersist,
-		CanStart: d.singletonVeto,
+		CanStart: d.canStart,
 	})
 
 	d.mu.Lock()

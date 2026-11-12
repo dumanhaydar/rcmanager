@@ -59,6 +59,8 @@ func PaintStatus(status string) string {
 		return ansi.Yellow(status)
 	case "errored":
 		return ansi.Red(status)
+	case "auth-required":
+		return ansi.Yellow(status)
 	case "stopped", "disabled":
 		return ansi.Grey(status)
 	}

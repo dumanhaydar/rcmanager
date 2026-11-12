@@ -108,6 +108,7 @@ func commands() map[string]handler {
 		"trust":     trust,
 		"untrust":   untrust,
 		"providers": providers,
+		"doctor":    doctor,
 		"discover":  discover,
 
 		"daemon":  daemonCmd,
@@ -158,6 +159,8 @@ func helpText() string {
   logs [name] [-n N] [-f]    Per-session logs ` + g("(-f follows)") + `
   discover [name]            Sessions the provider knows about locally
   providers                  Installed provider CLIs and their limitations
+  doctor                     Is each provider signed in, from your shell and
+                             from the daemon? ` + g("(and why not, when they differ)") + `
 
 ` + b("CONFIGURATION") + `
   config list                Show all settings

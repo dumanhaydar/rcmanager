@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"testing"
 	"time"
 
@@ -11,6 +12,7 @@ import (
 	"github.com/dumanhaydar/rcmanager/internal/paths"
 	"github.com/dumanhaydar/rcmanager/internal/procs"
 	"github.com/dumanhaydar/rcmanager/internal/provider"
+	_ "github.com/dumanhaydar/rcmanager/internal/provider/claude"
 	"github.com/dumanhaydar/rcmanager/internal/registry"
 	"github.com/dumanhaydar/rcmanager/internal/session"
 )
@@ -440,5 +442,97 @@ func TestResetLeavesAStoppedSessionStopped(t *testing.T) {
 	}
 	if registry.Get("demo").SessionID == before {
 		t.Error("the conversation was not replaced")
+	}
+}
+
+// fakeClaude installs a stand-in for the claude CLI that reports itself signed
+// out — with an account in the same document, to prove it is never logged —
+// and fails loudly if anything tries to run it as a session.
+func fakeClaude(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "spawned")
+	script := `#!/bin/sh
+case "$1 $2" in
+  "--version "*) echo "9.9.9 (Claude Code)" ;;
+  "auth status")
+    echo '{"loggedIn":false,"authMethod":"claude.ai","email":"someone@example.com","orgName":"Example Org","loginExpiresAt":"2026-11-01T00:00:00Z"}'
+    exit 1 ;;
+  *) touch "` + marker + `"; exec sleep 30 ;;
+esac
+`
+	bin := filepath.Join(dir, "claude")
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("RCMANAGER_CLAUDE_BIN", bin)
+	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
+	return marker
+}
+
+// The incident this guards against: under launchd the daemon's claude could
+// not read a valid login, so every session came up, said "Not logged in",
+// and sat there reported as online. Now the daemon asks first, refuses to
+// start them, says why once, and never writes the account to its log.
+func TestASignedOutProviderIsNotStarted(t *testing.T) {
+	spawned := fakeClaude(t)
+	d, socket := start(t)
+
+	entry := &registry.Entry{Name: "signed-out", Provider: "claude", Cwd: t.TempDir(), Enabled: true,
+		SessionID: "f6f781de-c2f3-4a60-b545-b7aad334d907"}
+	if err := call(t, socket, "register", ipc.Args{Entry: entry}, nil); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		err := call(t, socket, "start", ipc.Args{Name: "signed-out"}, nil)
+		if err == nil || !strings.Contains(err.Error(), "not signed in") {
+			t.Fatalf("start #%d: err = %v, want a not-signed-in refusal", i+1, err)
+		}
+	}
+
+	s, err := d.get("signed-out")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Status() != session.AuthRequired || s.Pid() != 0 {
+		t.Errorf("status=%q pid=%d, want auth-required and no process", s.Status(), s.Pid())
+	}
+	if !strings.Contains(s.View().Message, "rcmanager doctor") {
+		t.Errorf("message = %q", s.View().Message)
+	}
+	if _, err := os.Stat(spawned); err == nil {
+		t.Error("the signed-out CLI was launched as a session")
+	}
+
+	raw, err := os.ReadFile(paths.Get().DaemonLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	log := string(raw)
+	if n := strings.Count(log, "NOT signed in"); n != 1 {
+		t.Errorf("daemon.log says NOT signed in %d times, want once:\n%s", n, log)
+	}
+	if !strings.Contains(log, "loggedIn=false authMethod=claude.ai expiresAt=2026-11-01T00:00:00Z") {
+		t.Errorf("daemon.log lacks the login summary:\n%s", log)
+	}
+	for _, secret := range []string{"someone@example.com", "Example Org"} {
+		if strings.Contains(log, secret) {
+			t.Errorf("daemon.log contains %q", secret)
+		}
+	}
+
+	// doctor's view from the daemon carries the same facts and nothing more.
+	var ctx DaemonContext
+	if err := call(t, socket, "authStatus", ipc.Args{}, &ctx); err != nil {
+		t.Fatal(err)
+	}
+	var claudeReport *AuthReport
+	for i := range ctx.Providers {
+		if ctx.Providers[i].Provider == "claude" {
+			claudeReport = &ctx.Providers[i]
+		}
+	}
+	if claudeReport == nil || !claudeReport.Known || claudeReport.LoggedIn || claudeReport.Method != "claude.ai" {
+		t.Errorf("authStatus claude report = %+v", claudeReport)
 	}
 }

@@ -112,6 +112,15 @@ type Interaction struct {
 	Answered string
 	Describe string
 	Delay    time.Duration
+	// Status, when set, means the session cannot work at all in this state
+	// (the CLI is not signed in, say). rcmanager stops it and leaves it in this
+	// status instead of restarting it into the same wall.
+	//
+	// Such a prompt is only believed at startup, before the session has
+	// published a URL. Later, the same words are far likelier to be the agent
+	// talking about them — a conversation about this very message, replayed on
+	// resume, would otherwise take its own session down.
+	Status string
 }
 
 // Owner is another process already driving a session.
@@ -134,9 +143,35 @@ type InstallOption struct {
 
 // Auth is whether this machine is signed in to a provider.
 type Auth struct {
-	// LoggedIn is nil when the provider cannot report it.
+	// LoggedIn is nil when the provider cannot report it — including when the
+	// status command itself failed. Only a definite false means "not signed in".
 	LoggedIn *bool
-	Detail   string
+	// Detail is for the user's own terminal: it may name the account. Never
+	// write it to a log; Method and ExpiresAt are what is safe to record.
+	Detail string
+	// Method is how the CLI is signed in ("claude.ai", "console", …).
+	Method string
+	// ExpiresAt is when the login lapses (RFC 3339), if the CLI says.
+	ExpiresAt string
+}
+
+// Summary describes the login without naming the account, so it can go in a
+// log: signed in or not, the method and the expiry, and nothing else.
+func (a Auth) Summary() string {
+	state := "unknown"
+	if a.LoggedIn != nil {
+		state = "loggedIn=false"
+		if *a.LoggedIn {
+			state = "loggedIn=true"
+		}
+	}
+	if a.Method != "" {
+		state += " authMethod=" + a.Method
+	}
+	if a.ExpiresAt != "" {
+		state += " expiresAt=" + a.ExpiresAt
+	}
+	return state
 }
 
 // LoginCmd is the command that signs a user in.

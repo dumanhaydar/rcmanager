@@ -64,7 +64,11 @@ func (d *Daemon) handle(req ipc.Request, progress func(ipc.Progress)) (any, erro
 		}
 		return s.View(), nil
 
+	case "authStatus":
+		return d.authReport(), nil
+
 	case "start":
+		d.auth.invalidate()
 		s, err := d.get(req.Args.Name)
 		if err != nil {
 			return nil, err
@@ -93,6 +97,7 @@ func (d *Daemon) handle(req ipc.Request, progress func(ipc.Progress)) (any, erro
 		return result.Status, nil
 
 	case "restart":
+		d.auth.invalidate()
 		s, err := d.get(req.Args.Name)
 		if err != nil {
 			return nil, err
@@ -108,15 +113,18 @@ func (d *Daemon) handle(req ipc.Request, progress func(ipc.Progress)) (any, erro
 		return d.rename(req.Args.Name, req.Args.NewName)
 
 	case "reset":
+		d.auth.invalidate()
 		return d.reset(req.Args.Name)
 
 	case "enable", "disable":
+		d.auth.invalidate()
 		return d.toggle(req.Args.Name, req.Cmd == "enable")
 
 	case "remove":
 		return d.remove(req.Args.Name)
 
 	case "startAll", "stopAll", "restartAll":
+		d.auth.invalidate()
 		return d.bulk(req.Cmd, progress), nil
 
 	case "reload":

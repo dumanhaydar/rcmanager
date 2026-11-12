@@ -12,6 +12,7 @@ import (
 	"github.com/dumanhaydar/rcmanager/internal/paths"
 	"github.com/dumanhaydar/rcmanager/internal/procs"
 	"github.com/dumanhaydar/rcmanager/internal/provider"
+	"github.com/dumanhaydar/rcmanager/internal/provider/claude"
 	"github.com/dumanhaydar/rcmanager/internal/registry"
 	"github.com/dumanhaydar/rcmanager/internal/sio"
 )
@@ -32,6 +33,8 @@ type fake struct {
 	nameInSignature bool
 	// preflight, when set, is what the provider reports instead of "ok".
 	preflight *provider.Result
+	// interactions, when set, replaces the readiness prompt.
+	interactions []provider.Interaction
 }
 
 func (fake) ID() string                            { return "fake" }
@@ -76,6 +79,9 @@ func (f fake) ExtractRemoteURL(text string) string {
 }
 
 func (f fake) Interactions() []provider.Interaction {
+	if f.interactions != nil {
+		return f.interactions
+	}
 	if !f.prompt {
 		return nil
 	}
@@ -686,4 +692,98 @@ func mustEntry(t *testing.T, name, sessionID, cwd string) *registry.Entry {
 		t.Fatal(err)
 	}
 	return e
+}
+
+// notLoggedIn is the real provider's interaction, so these tests exercise the
+// pattern that runs in production rather than a stand-in.
+func notLoggedIn(t *testing.T) []provider.Interaction {
+	t.Helper()
+	for _, i := range (claude.Provider{}).Interactions() {
+		if i.ID == "not-logged-in" {
+			return []provider.Interaction{i}
+		}
+	}
+	t.Fatal("the claude provider has no not-logged-in interaction")
+	return nil
+}
+
+// A CLI that is not signed in stays alive and says so in its status line.
+// That used to read as online, then as "stuck on a prompt". It is neither:
+// the session is stopped and left as auth-required, and not restarted into the
+// same wall.
+func TestNotSignedInStopsTheSessionAsAuthRequired(t *testing.T) {
+	withHome(t)
+	p := fake{
+		script:       `printf '%s\n' "                Notlogged in · Run /login" "Notloggedin·Run/login·✘Auto-updatefailed"; while true; do sleep 1; done`,
+		interactions: notLoggedIn(t),
+	}
+	s := newSession(t, p, testConfig())
+
+	if r := s.Start(false); !r.OK {
+		t.Fatalf("Start() = %+v", r)
+	}
+	pid := s.Pid()
+	waitFor(t, "the session to be marked auth-required", func() bool { return s.Status() == AuthRequired })
+	waitFor(t, "the child to be stopped", func() bool { return s.Pid() == 0 && !procs.IsAlive(pid) })
+
+	// Long enough for a restart, had one been scheduled.
+	time.Sleep(500 * time.Millisecond)
+	view := s.View()
+	if view.Status != AuthRequired {
+		t.Errorf("status = %q, want auth-required", view.Status)
+	}
+	if view.Restarts != 0 || s.Pid() != 0 {
+		t.Errorf("it was restarted: restarts=%d pid=%d", view.Restarts, s.Pid())
+	}
+	if !strings.Contains(view.Message, "not signed in") || strings.Contains(view.Message, "stuck on a prompt") {
+		t.Errorf("message = %q", view.Message)
+	}
+
+	// Fixing the login and starting again is allowed: auth-required is not
+	// "running".
+	if again := s.Start(false); again.AlreadyRunning {
+		t.Errorf("Start() after auth-required = %+v", again)
+	}
+}
+
+// Once a session has published its URL it is signed in, and the same words
+// later on are the agent talking — a conversation about this very message,
+// replayed on resume, must not take its own session down.
+func TestNotSignedInIsIgnoredOnceTheURLIsKnown(t *testing.T) {
+	withHome(t)
+	p := fake{
+		script:       `echo "URL=https://example.test/session_1"; sleep 0.5; echo "the status line said Notlogged in · Run /login"; while true; do sleep 1; done`,
+		url:          regexp.MustCompile(`URL=(\S+)`),
+		interactions: notLoggedIn(t),
+	}
+	s := newSession(t, p, testConfig())
+
+	s.Start(false)
+	waitFor(t, "the URL to be captured", func() bool { return s.View().RemoteURL != "" })
+	time.Sleep(1500 * time.Millisecond)
+	if st := s.Status(); st != Online {
+		t.Errorf("status = %q, want online", st)
+	}
+}
+
+func TestAVetoCanLeaveASessionAuthRequired(t *testing.T) {
+	withHome(t)
+	entry, err := registry.Normalize(&registry.Entry{
+		Name: "demo", Provider: "fake", Cwd: t.TempDir(), Enabled: true,
+	}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := New(entry, fake{script: `while true; do sleep 1; done`}, Options{
+		Config:   testConfig(),
+		CanStart: func(*Managed) *Veto { return &Veto{Error: "not signed in", Status: AuthRequired} },
+	})
+	defer s.Dispose()
+
+	if r := s.Start(false); r.OK {
+		t.Fatalf("Start() = %+v", r)
+	}
+	if s.Status() != AuthRequired || s.Pid() != 0 {
+		t.Errorf("status=%q pid=%d", s.Status(), s.Pid())
+	}
 }

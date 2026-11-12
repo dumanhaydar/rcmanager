@@ -143,11 +143,12 @@ func (Provider) AuthStatus() provider.Auth {
 		}
 		return provider.Auth{LoggedIn: &yes, Detail: detail}
 	}
+	// A status command that failed says nothing about the login.
 	detail := r.Err
 	if detail == "" {
 		detail = "could not determine login status"
 	}
-	return provider.Auth{LoggedIn: &no, Detail: detail}
+	return provider.Auth{Detail: detail}
 }
 
 func (Provider) LoginCommand() *provider.LoginCmd {
